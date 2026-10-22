@@ -6,7 +6,6 @@ ifeq ($(ROOTLESS),1)
 	TARGET = iphone:clang:latest:15.0
 endif
 
-
 # Define included files, imported frameworks, etc.
 
 BUNDLE_NAME = ReverieCC
@@ -24,20 +23,6 @@ include $(THEOS_MAKE_PATH)/bundle.mk
 
 ifeq ($(ROOTLESS),1)
 internal-stage::
-	@$(PRINT_FORMAT_MAKING) "Patching load commands for $(BUNDLE_NAME)"
-	
-	$(ECHO_NOTHING)for fw in $($(BUNDLE_NAME)_EXTRA_FRAMEWORKS); do \
-		install_name_tool -change /Library/Frameworks/$$fw.framework/$$fw \
-		/var/jb/Library/Frameworks/$$fw.framework/$$fw \
-		"$(THEOS_STAGING_DIR)/Library/ControlCenter/Bundles/$(BUNDLE_NAME).bundle/$(BUNDLE_NAME)" > /dev/null 2>&1 ; \
-	done$(ECHO_END)
-	
-	$(ECHO_NOTHING)for lib in $($(BUNDLE_NAME)_LIBRARIES); do \
-		install_name_tool -change /usr/lib/lib$$lib.dylib \
-		/var/jb/usr/lib/lib$$lib.dylib \
-		"$(THEOS_STAGING_DIR)/Library/ControlCenter/Bundles/$(BUNDLE_NAME).bundle/$(BUNDLE_NAME)" > /dev/null 2>&1 ; \
-	done$(ECHO_END)
-	
 	@$(PRINT_FORMAT_MAKING) "Re-signing $(BUNDLE_NAME)"
 	
 	$(ECHO_NOTHING)ldid -S "$(THEOS_STAGING_DIR)/Library/ControlCenter/Bundles/$(BUNDLE_NAME).bundle/$(BUNDLE_NAME)"$(ECHO_END)

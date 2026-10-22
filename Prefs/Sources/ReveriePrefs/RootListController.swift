@@ -1,7 +1,23 @@
-import JinxPrefs
 import Preferences
 
 final class RootListController: PSListController {
+    private var ruleSpecifierIDs: [String] {
+        ["wakeOnCharge", "sleepOnUnplug", "Sleep Rules", "sleepOnlyWhenLocked", "sleepWithCarPlay"]
+    }
+    
+    private var ruleCells: [JinxCell] {
+        [
+            ToggleCell(name: "Wake on Charger", key: "wakeOnCharge", defaultValue: true),
+            ToggleCell(name: "Sleep on Unplug", key: "sleepOnUnplug", defaultValue: true),
+            GroupCell(
+                name: "Sleep Rules",
+                footerText: "Reverie only hibernates while the device is idle. Keeping an active CarPlay session alive requires leaving this off: hibernation powers down Wi-Fi and Bluetooth."
+            ),
+            ToggleCell(name: "Sleep Only While Locked", key: "sleepOnlyWhenLocked", defaultValue: true),
+            ToggleCell(name: "Sleep While CarPlay Active", key: "sleepWithCarPlay", defaultValue: false)
+        ]
+    }
+    
     override var specifiers: NSMutableArray? {
         get {
             if let specifiers = value(forKey: "_specifiers") as? NSMutableArray {
@@ -16,13 +32,7 @@ final class RootListController: PSListController {
             ], to: &specifiers, in: self)
             
             if PrefsHelper.getValue(for: "isEnabled", fallback: true) as? Bool == true {
-                SpecifierFactory.add([
-                    ToggleCell(name: "Fast Charge", key: "canFastCharge", defaultValue: true),
-                    GroupCell(name: "Sleep Level", footerText: ""),
-                    SliderCell(key: "sleepLevel", defaultValue: 7, range: 1 ..< 100),
-                    GroupCell(name: "Wake Level", footerText: ""),
-                    SliderCell(key: "wakeLevel", defaultValue: 20, range: 1 ..< 100)
-                ], to: &specifiers, in: self)
+                SpecifierFactory.add(ruleCells, to: &specifiers, in: self)
             }
             
             SpecifierFactory.add([
@@ -68,17 +78,11 @@ final class RootListController: PSListController {
         if value as? Bool == true {
             var newSpecifiers: NSMutableArray = .init()
             
-            SpecifierFactory.add([
-                ToggleCell(name: "Fast Charge", key: "canFastCharge", defaultValue: true),
-                GroupCell(name: "Sleep Level", footerText: ""),
-                SliderCell(key: "sleepLevel", defaultValue: 7, range: 1 ..< 100),
-                GroupCell(name: "Wake Level", footerText: ""),
-                SliderCell(key: "wakeLevel", defaultValue: 20, range: 1 ..< 100)
-            ], to: &newSpecifiers, in: self)
+            SpecifierFactory.add(ruleCells, to: &newSpecifiers, in: self)
             
             self.insertContiguousSpecifiers(newSpecifiers as? [Any], afterSpecifierID: "isEnabled", animated: true)
         } else {
-            let hiddenIDs: [Any] = self.specifiers(forIDs: ["canFastCharge", "Sleep Level", "sleepLevel", "Wake Level", "wakeLevel"])
+            let hiddenIDs: [Any] = self.specifiers(forIDs: ruleSpecifierIDs)
             self.removeContiguousSpecifiers(hiddenIDs, animated: true)
         }
         

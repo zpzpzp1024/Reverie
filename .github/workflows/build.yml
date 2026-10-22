@@ -1,0 +1,73 @@
+name: build
+
+on:
+  push:
+    branches: [emt]
+  pull_request:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: macos-14
+    env:
+      THEOS: ${{ github.workspace }}/theos
+      THEOS_SDK: iPhoneOS16.5.sdk
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Cache Theos
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.THEOS }}
+          key: theos-macos-${{ env.THEOS_SDK }}-v1
+
+      - name: Install Theos
+        run: |
+          set -euo pipefail
+
+          if [ ! -d "$THEOS/.git" ]; then
+            git clone --recursive --depth 1 --shallow-submodules https://github.com/theos/theos.git "$THEOS"
+          fi
+
+          if [ ! -d "$THEOS/sdks/$THEOS_SDK" ]; then
+            git clone --depth 1 --filter=blob:none --sparse https://github.com/theos/sdks.git "$THEOS/sdks"
+            git -C "$THEOS/sdks" sparse-checkout set "$THEOS_SDK"
+          fi
+
+          echo "$THEOS/bin" >> "$GITHUB_PATH"
+
+      - name: Install ldid
+        run: brew install ldid
+
+      - name: Fetch Swift dependencies
+        run: make setup
+
+      - name: Build package
+        run: make package FINALPACKAGE=1
+
+      - name: Show package
+        run: ls -la packages/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: reverie-deb
+          path: packages/*.deb
+          if-no-files-found: error
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: packages/*.deb

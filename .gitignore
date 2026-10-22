@@ -9,3 +9,7 @@ xcuserdata/
 .theos/
 packages/
 .DS_Store
+
+# build dependencies fetched by `make setup`
+/vendor/Jinx
+/vendor/JinxPrefs

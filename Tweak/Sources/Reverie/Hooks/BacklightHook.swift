@@ -1,14 +1,12 @@
-import Jinx
 import ObjectiveC
-import ReverieImports
 
 struct BacklightHook: Hook {
-    typealias T = @convention(c) (AnyObject, Selector, Int64) -> Void
+    typealias T = @convention(c) (AnyObject, Selector, UInt64) -> Void
     
-    let cls: AnyClass? = SBBacklightController.self
-    let sel: Selector = #selector(SBBacklightController.turnOnScreenFully)
+    let cls: AnyClass? = objc_lookUpClass("SBBacklightController")
+    let sel: Selector = sel_registerName("turnOnScreenFullyWithBacklightSource:")
     let replace: T = { obj, sel, source in
-        guard Reverie.status != .autoSlept && Reverie.status != .userSlept else {
+        guard !Reverie.isSleeping else {
             return
         }
         

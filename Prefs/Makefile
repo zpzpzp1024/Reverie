@@ -6,20 +6,22 @@ ifeq ($(ROOTLESS),1)
 	TARGET = iphone:clang:latest:15.0
 endif
 
-# Make Jinx work from SPM
+# JinxPrefs is compiled straight into the bundle; SPM/DerivedData is not used.
 
-♎ = $(HOME)/Library/Developer/Xcode/DerivedData
-♍ = $(shell find $(♎) -maxdepth 1 -type d -name "Prefs-*" -exec ls -td {} + | head -n 1)
-♌ = /SourcePackages/checkouts/JinxPrefs/Sources/JinxPrefs
-♏ = $(♍)$(♌)
+JINXPREFS_DIR = $(THEOS_PROJECT_DIR)/vendor/JinxPrefs
+JINXPREFS_SOURCES = $(shell find $(JINXPREFS_DIR)/Sources/JinxPrefs -name '*.swift' 2>/dev/null)
 
 # Define included files, imported frameworks, etc.
 
 BUNDLE_NAME = ReveriePrefs
-$(BUNDLE_NAME)_FILES = $(shell find Sources/$(BUNDLE_NAME) -name '*.swift') $(shell find $(♏) -name '*.swift')
+$(BUNDLE_NAME)_FILES = $(shell find Sources/$(BUNDLE_NAME) -name '*.swift') $(JINXPREFS_SOURCES)
 $(BUNDLE_NAME)_CFLAGS = -fobjc-arc
 $(BUNDLE_NAME)_INSTALL_PATH = /Library/PreferenceBundles
 $(BUNDLE_NAME)_PRIVATE_FRAMEWORKS = Preferences
+
+ifeq ($(ROOTLESS),1)
+$(BUNDLE_NAME)_SWIFTFLAGS = -DJINX_ROOTLESS
+endif
 
 # Theos makefiles to include
 
@@ -31,20 +33,6 @@ include $(THEOS_MAKE_PATH)/bundle.mk
 
 ifeq ($(ROOTLESS),1)
 internal-stage::
-	@$(PRINT_FORMAT_MAKING) "Patching load commands for $(BUNDLE_NAME)"
-	
-	$(ECHO_NOTHING)for fw in $($(BUNDLE_NAME)_EXTRA_FRAMEWORKS); do \
-		install_name_tool -change /Library/Frameworks/$$fw.framework/$$fw \
-		/var/jb/Library/Frameworks/$$fw.framework/$$fw \
-		"$(THEOS_STAGING_DIR)/Library/PreferenceBundles/$(BUNDLE_NAME).bundle/$(BUNDLE_NAME)" > /dev/null 2>&1 ; \
-	done$(ECHO_END)
-	
-	$(ECHO_NOTHING)for lib in $($(BUNDLE_NAME)_LIBRARIES); do \
-		install_name_tool -change /usr/lib/lib$$lib.dylib \
-		/var/jb/usr/lib/lib$$lib.dylib \
-		"$(THEOS_STAGING_DIR)/Library/PreferenceBundles/$(BUNDLE_NAME).bundle/$(BUNDLE_NAME)" > /dev/null 2>&1 ; \
-	done$(ECHO_END)
-	
 	@$(PRINT_FORMAT_MAKING) "Re-signing $(BUNDLE_NAME)"
 	
 	$(ECHO_NOTHING)ldid -S "$(THEOS_STAGING_DIR)/Library/PreferenceBundles/$(BUNDLE_NAME).bundle/$(BUNDLE_NAME)"$(ECHO_END)
