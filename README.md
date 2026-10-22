@@ -49,11 +49,24 @@ submodule. Set `THEOS_SDK` to override the SDK directory name.
 
 ## Install
 
+Over SSH from a computer (install OpenSSH from Sileo first; the default root
+password is `alpine`):
+
 ```sh
-sileo install ./packages/lilliana.reverie_*_iphoneos-arm64.deb
+scp packages/lilliana.reverie_*_iphoneos-arm64.deb root@<iphone-ip>:/var/mobile/
+ssh root@<iphone-ip>
+/var/jb/usr/bin/dpkg -i /var/mobile/lilliana.reverie_*_iphoneos-arm64.deb
+sbreload
 ```
 
-Respring after installing or after changing any setting in Settings → Reverie.
+On the device, Filza can install a `.deb` directly: open it and choose Install.
+Respring after installing or after changing any setting in Settings -> Reverie.
+
+## Sileo source
+
+Each release also publishes a flat repository to the `gh-pages` branch. Enable it
+once in the repository settings under Settings -> Pages (Source: "Deploy from a
+branch", branch `gh-pages`, folder `/ (root)`), then add the site URL to Sileo.
 
 ## Verify
 

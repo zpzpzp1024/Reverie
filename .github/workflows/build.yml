@@ -3,6 +3,7 @@ name: build
 on:
   push:
     branches: [emt]
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
   release:
@@ -74,3 +75,31 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: packages/*.deb
+
+  # Publishes a flat APT repository to the gh-pages branch, so the tweak can be
+  # added to Sileo as a source instead of being installed from a file.
+  repo:
+    needs: package
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'release'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Download package
+        uses: actions/download-artifact@v4
+        with:
+          name: reverie-deb
+          path: packages
+
+      - name: Build repository index
+        run: python3 scripts/make_repo.py packages repo
+
+      - name: Publish repository
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: repo
+          publish_branch: gh-pages
+          commit_message: "repo: ${{ github.ref_name }}"
