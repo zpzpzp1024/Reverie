@@ -70,9 +70,22 @@ branch", branch `gh-pages`, folder `/ (root)`), then add the site URL to Sileo.
 
 ## Verify
 
+Every event is written to `/var/mobile/Library/Logs/Reverie.log`, which can be
+opened in Filza or with `cat`. It rotates at 256 KB.
+
+For live output, the entries are info level, so `--info` is required:
+
 ```sh
-log stream --predicate 'subsystem == "lilliana.reverie"'
+log stream --info --style compact --predicate 'subsystem == "lilliana.reverie"'
 ```
 
-The log reports the charger transitions, every refused sleep (CarPlay active, no
-power connection), and each `IOPMSleepSystem` call.
+Note that a USB cable counts as a charger, so a device connected to a computer
+never hibernates. Test on battery, then read the log file afterwards.
+
+Expected sequence when the charger is removed while locked:
+
+```
+charger state changed, charging = false
+sleeping, reason = autoSlept
+IOPMSleepSystem
+```
