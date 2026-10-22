@@ -1,0 +1,17 @@
+Package: lilliana.reverie
+Name: Reverie
+Description: Let your iPhone dream
+Maintainer: Paisseon
+Author: Paisseon
+Section: Tweaks
+Depends: mobilesubstrate, firmware (>= 13.0), preferenceloader, com.opa334.ccsupport
+SileoDepiction: https://paisseon.github.io/depictions/Reverie.json
+Depiction: https://pinpal.github.io/Sileo-Depiction-WebViews/?json=https://paisseon.github.io/depictions/Reverie.json&name=Reverie&dev=Paisseon
+Icon: https://paisseon.github.io/icons/Reverie.png
+Architecture: iphoneos-arm64
+Version: 0.1.0
+Installed-Size: 828
+Filename: ./lilliana.reverie_0.1.0_iphoneos-arm64.deb
+Size: 97034
+SHA256: 074f397498a6c3ebc108bf89d512a11e5693b53511d9c42b6b575ecd2536c06a
+MD5sum: d3a1d16e614224928fda86ba852aeb50
