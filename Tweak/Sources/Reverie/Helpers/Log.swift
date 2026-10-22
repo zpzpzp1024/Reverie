@@ -1,3 +1,4 @@
+import Foundation
 import os.log
 
 /// Unified log plus a plain-text mirror in `/var/mobile/Library/Logs/Reverie.log`.
