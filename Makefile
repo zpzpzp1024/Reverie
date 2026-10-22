@@ -49,5 +49,5 @@ internal-stage::
 
 	$(ECHO_NOTHING)mkdir -p "$(THEOS_STAGING_DIR)/var/jb"$(ECHO_END)
 
-	$(ECHO_NOTHING)if [ -d "$(THEOS_STAGING_DIR)/Library" ]; then rm -rf "$(THEOS_STAGING_DIR)/var/jb/Library"; mv "$(THEOS_STAGING_DIR)/Library" "$(THEOS_STAGING_DIR)/var/jb/"$(ECHO_END)
+	$(ECHO_NOTHING)if [ -d "$(THEOS_STAGING_DIR)/Library" ]; then rm -rf "$(THEOS_STAGING_DIR)/var/jb/Library"; mv "$(THEOS_STAGING_DIR)/Library" "$(THEOS_STAGING_DIR)/var/jb/"; fi$(ECHO_END)
 endif
