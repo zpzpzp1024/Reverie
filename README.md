@@ -31,10 +31,12 @@ built around the assumption that the car cuts power when it is turned off.
 
 ## Build
 
-The build runs on macOS. `make setup` vendors the Swift dependencies, then:
+The build runs on macOS and needs Theos with the `iPhoneOS16.5.sdk` SDK, the
+`theos/headers` submodule and `ldid` in `PATH` (set `THEOS_SDK` to override the
+SDK directory name):
 
 ```sh
-make setup
+make setup          # vendor Jinx and JinxPrefs
 make package FINALPACKAGE=1
 ```
 
