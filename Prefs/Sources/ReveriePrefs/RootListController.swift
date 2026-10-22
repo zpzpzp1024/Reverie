@@ -2,19 +2,19 @@ import Preferences
 
 final class RootListController: PSListController {
     private var ruleSpecifierIDs: [String] {
-        ["wakeOnCharge", "sleepOnUnplug", "Sleep Rules", "sleepOnlyWhenLocked", "sleepWithCarPlay"]
+        ["wakeOnCharge", "sleepOnUnplug", "休眠规则", "sleepOnlyWhenLocked", "sleepWithCarPlay"]
     }
     
     private var ruleCells: [JinxCell] {
         [
-            ToggleCell(name: "Wake on Charger", key: "wakeOnCharge", defaultValue: true),
-            ToggleCell(name: "Sleep on Unplug", key: "sleepOnUnplug", defaultValue: true),
+            ToggleCell(name: "接上电源时唤醒", key: "wakeOnCharge", defaultValue: true),
+            ToggleCell(name: "拔掉电源时休眠", key: "sleepOnUnplug", defaultValue: true),
             GroupCell(
-                name: "Sleep Rules",
-                footerText: "Reverie only hibernates while the device is idle. Keeping an active CarPlay session alive requires leaving this off: hibernation powers down Wi-Fi and Bluetooth."
+                name: "休眠规则",
+                footerText: "Reverie 只在设备闲置时进入休眠。休眠会关闭 Wi-Fi 与蓝牙，要保住 CarPlay 会话就不要打开下面的选项。"
             ),
-            ToggleCell(name: "Sleep Only While Locked", key: "sleepOnlyWhenLocked", defaultValue: true),
-            ToggleCell(name: "Sleep While CarPlay Active", key: "sleepWithCarPlay", defaultValue: false)
+            ToggleCell(name: "仅在锁屏时休眠", key: "sleepOnlyWhenLocked", defaultValue: true),
+            ToggleCell(name: "使用 CarPlay 时也休眠", key: "sleepWithCarPlay", defaultValue: false)
         ]
     }
     
@@ -27,8 +27,11 @@ final class RootListController: PSListController {
             var specifiers: NSMutableArray = .init()
             
             SpecifierFactory.add([
-                GroupCell(name: "General", footerText: ""),
-                ToggleCell(name: "Enable", key: "isEnabled", defaultValue: true)
+                GroupCell(
+                    name: "通用",
+                    footerText: "接上电源自动退出休眠，拔掉电源后自动休眠。适用于长期放在车里的设备。"
+                ),
+                ToggleCell(name: "启用", key: "isEnabled", defaultValue: true)
             ], to: &specifiers, in: self)
             
             if PrefsHelper.getValue(for: "isEnabled", fallback: true) as? Bool == true {
@@ -36,12 +39,8 @@ final class RootListController: PSListController {
             }
             
             SpecifierFactory.add([
-                GroupCell(name: "", footerText: ""),
-                ButtonCell(name: "Sleep Now", action: #selector(Self.sleepDart)),
-                GroupCell(name: "Links", footerText: ""),
-                ButtonCell(name: "Source Code", action: #selector(Self.openSource)),
-                ButtonCell(name: "CyPwn's Discord", action: #selector(Self.openCyPwn)),
-                GroupCell(name: "", footerText: poem)
+                GroupCell(name: "操作", footerText: ""),
+                ButtonCell(name: "立即休眠", action: #selector(Self.sleepDart))
             ], to: &specifiers, in: self)
             
             setValue(specifiers, forKey: "_specifiers")
@@ -50,16 +49,16 @@ final class RootListController: PSListController {
         
         set { super.specifiers = newValue }
     }
-
+    
     override func viewDidLoad() {
         super.viewDidLoad()
         
         Metadata.developer = "Paisseon"
         Metadata.package = "lilliana.reverie"
         Metadata.tweakName = "Reverie"
-		
+        
         navigationItem.rightBarButtonItem = UIBarButtonItem(
-            title: "Apply",
+            title: "应用",
             style: .done,
             target: self,
             action: #selector(respring)
@@ -103,38 +102,4 @@ final class RootListController: PSListController {
             true
         )
     }
-    
-    @objc private func openSource() {
-        if let url: URL = .init(string: "https://github.com/Paisseon/Reverie") {
-            UIApplication.shared.open(url)
-        }
-    }
-    
-    @objc private func openCyPwn() {
-        if let url: URL = .init(string: "https://discord.gg/cypwn") {
-            UIApplication.shared.open(url)
-        }
-    }
-    
-    private let poem: String = """
-The search for meaning is a lonely journey
-Through a world that's cold and unforgiving
-We thought that we had found our freedom
-But it was only an illusion, a fleeting moment of bliss
-
-We left our past behind, thinking we could start anew
-But the chains of our past lives still held us in their grip
-No matter how far we ran, we could not escape
-The ghosts of our past haunting us with every step we took
-                          
-We thought that freedom meant a chance to find our purpose
-But what we found was only emptiness and despair
-We realised that true freedom comes from within
-From letting go of the pain and the hurt of our past
-                          
-Only then can we truly start to heal
-And find the meaning and purpose that we seek
-We must face our demons, and forgive those who have wronged us
-In order to break the shackles that bind us and finally be free
-"""
 }

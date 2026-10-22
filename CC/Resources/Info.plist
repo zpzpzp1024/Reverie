@@ -4,6 +4,8 @@
 <dict>
 	<key>CFBundleName</key>
 	<string>ReverieCC</string>
+	<key>CFBundleDisplayName</key>
+	<string>休眠</string>
 	<key>CFBundleExecutable</key>
 	<string>ReverieCC</string>
 	<key>CFBundleIdentifier</key>
