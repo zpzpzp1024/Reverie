@@ -109,6 +109,19 @@ struct Reverie {
             return
         }
         
+        // Refuse before touching any state: the device cannot survive the radios
+        // going down mid-session, so a refused request must leave the state
+        // machine alone. Marking it asleep here would stop every later attempt.
+        guard Preferences.sleepWithCarPlay || !CarPlay.isActive else {
+            Log.info("carplay is active, staying awake")
+            return
+        }
+        
+        guard connect != 0 else {
+            Log.info("no power connection, cannot suspend")
+            return
+        }
+        
         settleWorkItem?.cancel()
         status = reason
         
@@ -131,19 +144,8 @@ struct Reverie {
         suspend()
     }
     
-    /// Suspends the SoC. Skipped while CarPlay is live unless the user allowed
-    /// it, because the session cannot survive the radios going down.
+    /// Suspends the SoC after giving the lock/fade animation a moment to land.
     private static func suspend() {
-        guard Preferences.sleepWithCarPlay || !CarPlay.isActive else {
-            Log.info("carplay is active, staying awake")
-            return
-        }
-        
-        guard connect != 0 else {
-            return
-        }
-        
-        // Give the lock/fade animation a moment to land before suspending.
         let work: DispatchWorkItem = .init {
             guard isSleeping else {
                 return
