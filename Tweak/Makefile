@@ -25,7 +25,13 @@ JINX_SOURCES = $(shell find $(JINX_DIR)/Sources/Jinx -name '*.swift' 2>/dev/null
 LIBRARY_NAME = Reverie
 $(LIBRARY_NAME)_FILES = Sources/load.s $(shell find Sources/$(LIBRARY_NAME) -name '*.swift') $(JINX_SOURCES)
 
+# library.mk defaults the install path to /usr/lib, which is also why the old
+# build could not find the dylib it was supposed to re-sign. Keep the dylib with
+# the other tweak dylibs.
+$(LIBRARY_NAME)_INSTALL_PATH = /Library/MobileSubstrate/DynamicLibraries
+
 ifeq ($(ROOTLESS),1)
+$(LIBRARY_NAME)_CFLAGS += -DJINX_ROOTLESS
 $(LIBRARY_NAME)_SWIFTFLAGS = -DJINX_ROOTLESS
 endif
 
@@ -37,12 +43,18 @@ include $(THEOS_MAKE_PATH)/library.mk
 
 # Rootless support? with a question mark
 
-ifeq ($(ROOTLESS),1)
-$(LIBRARY_NAME)_CFLAGS += -DJINX_ROOTLESS
-DYLIB_PATH = $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/$(LIBRARY_NAME).dylib
+DYLIB_DIR = $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries
 
+# library.mk only knows about the dylib, unlike tweak.mk which also copies the
+# MobileLoader filter next to it, so install the filter ourselves.
+internal-stage::
+	@$(PRINT_FORMAT_MAKING) "Installing $(LIBRARY_NAME) filter"
+
+	$(ECHO_NOTHING)cp "$(LIBRARY_NAME).plist" "$(DYLIB_DIR)/$(LIBRARY_NAME).plist"$(ECHO_END)
+
+ifeq ($(ROOTLESS),1)
 internal-stage::
 	@$(PRINT_FORMAT_MAKING) "Re-signing $(LIBRARY_NAME)"
-	
-	$(ECHO_NOTHING)ldid -S "$(DYLIB_PATH)"$(ECHO_END)
+
+	$(ECHO_NOTHING)ldid -S "$(DYLIB_DIR)/$(LIBRARY_NAME).dylib"$(ECHO_END)
 endif
