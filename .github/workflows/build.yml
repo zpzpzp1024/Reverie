@@ -94,7 +94,7 @@ jobs:
           path: packages
 
       - name: Build repository index
-        run: python3 scripts/make_repo.py packages repo
+        run: python3 scripts/make_repo.py packages repo "https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}/"
 
       - name: Publish repository
         uses: peaceiris/actions-gh-pages@v4
