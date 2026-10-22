@@ -11,6 +11,10 @@ export DEBUG = 0
 export THEOS_LEAN_AND_MEAN = 1
 export USING_JINX = 1
 
+# Theos defaults to lzma; xz is supported by every dpkg that can install a
+# rootless package and decompresses faster on device.
+export THEOS_PLATFORM_DEB_COMPRESSION_TYPE = xz
+
 # Vendored Swift dependencies
 #
 # These used to be resolved through Xcode's DerivedData, which only exists on a
@@ -42,10 +46,8 @@ setup::
 ifeq ($(ROOTLESS),1)
 internal-stage::
 	@$(PRINT_FORMAT_MAKING) "Moving files to rootless paths"
-	$(ECHO_NOTHING)mkdir -p "$(THEOS_STAGING_DIR)/var/jb/Library"$(ECHO_END)
-	$(ECHO_NOTHING)mv "$(THEOS_STAGING_DIR)/Library" "$(THEOS_STAGING_DIR)/var/jb"$(ECHO_END)
 
-before-package::
-	@$(PRINT_FORMAT_MAKING) "Patching control file architecture"
-	$(ECHO_NOTHING)perl -pi -e 's/iphoneos-arm/iphoneos-arm64/' "$(THEOS_STAGING_DIR)/DEBIAN/control"$(ECHO_END)
+	$(ECHO_NOTHING)mkdir -p "$(THEOS_STAGING_DIR)/var/jb"$(ECHO_END)
+
+	$(ECHO_NOTHING)if [ -d "$(THEOS_STAGING_DIR)/Library" ]; then rm -rf "$(THEOS_STAGING_DIR)/var/jb/Library"; mv "$(THEOS_STAGING_DIR)/Library" "$(THEOS_STAGING_DIR)/var/jb/"$(ECHO_END)
 endif

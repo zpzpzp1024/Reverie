@@ -1,7 +1,7 @@
 Package: lilliana.reverie
 Name: Reverie
 Version: 0.0.3
-Architecture: iphoneos-arm
+Architecture: iphoneos-arm64
 Description: Let your iPhone dream
 Maintainer: Paisseon
 Author: Paisseon
