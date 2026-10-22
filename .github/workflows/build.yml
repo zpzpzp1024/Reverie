@@ -41,8 +41,11 @@ jobs:
           fi
 
           if [ ! -d "$THEOS/sdks/$THEOS_SDK" ]; then
-            git clone --depth 1 --filter=blob:none --sparse https://github.com/theos/sdks.git "$THEOS/sdks"
-            git -C "$THEOS/sdks" sparse-checkout set "$THEOS_SDK"
+            SDK_TMP="$RUNNER_TEMP/theos-sdks"
+            rm -rf "$SDK_TMP"
+            git clone --depth 1 --filter=blob:none --sparse https://github.com/theos/sdks.git "$SDK_TMP"
+            git -C "$SDK_TMP" sparse-checkout set "$THEOS_SDK"
+            cp -R "$SDK_TMP/$THEOS_SDK" "$THEOS/sdks/"
           fi
 
           echo "$THEOS/bin" >> "$GITHUB_PATH"
