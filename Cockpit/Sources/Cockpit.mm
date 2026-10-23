@@ -207,6 +207,24 @@ static BOOL BoolReturn(id object, NSString *selector, BOOL fallback)
     return ((BOOL (*)(id, SEL))objc_msgSend)(object, sel);
 }
 
+static NSInteger IntReturn(id object, NSString *selector, NSInteger fallback)
+{
+    SEL sel = NSSelectorFromString(selector);
+    if (!object || ![object respondsToSelector:sel]) {
+        return fallback;
+    }
+    return ((NSInteger (*)(id, SEL))objc_msgSend)(object, sel);
+}
+
+static void CallInteger(id object, NSString *selector, NSInteger value)
+{
+    SEL sel = NSSelectorFromString(selector);
+    if (!object || ![object respondsToSelector:sel]) {
+        return;
+    }
+    ((void (*)(id, SEL, NSInteger))objc_msgSend)(object, sel, value);
+}
+
 #pragma mark - CarPlay display
 
 static void LogClassSelector(Class cls, NSString *selector, BOOL classMethod)
@@ -427,7 +445,23 @@ static void ConfigureAppViewController(id viewController, id entity)
         ((void (*)(id, SEL, BOOL))objc_msgSend)(viewController, ignoresSel, NO);
     }
     
-    CLog(@"host: _currentMode ivar=%d", SetObjectIvar(viewController, @"_currentMode", @2));
+    BOOL modeSet = NO;
+    if ([viewController respondsToSelector:NSSelectorFromString(@"_setCurrentMode:")]) {
+        CallInteger(viewController, @"_setCurrentMode:", 2);
+        modeSet = YES;
+    }
+    if (!modeSet) {
+        @try {
+            [viewController setValue:@2 forKey:@"currentMode"];
+            modeSet = YES;
+        } @catch (NSException *exception) {
+            CLog(@"host: currentMode via KVC failed: %@", exception.reason);
+        }
+    }
+    if (!modeSet) {
+        modeSet = SetObjectIvar(viewController, @"_currentMode", @2);
+    }
+    CLog(@"host: currentMode set=%d", modeSet);
     
     id activationSettings = Call0(viewController, @"_activationSettings");
     if (activationSettings) {
@@ -441,12 +475,15 @@ static void ConfigureAppViewController(id viewController, id entity)
         if (transaction) {
             id transitions = Call0(viewController, @"_activeTransitions");
             BOOL tracked = NO;
-            if ([transitions isKindOfClass:[NSMutableArray class]]) {
-                [transitions addObject:transaction];
+            if ([transitions respondsToSelector:@selector(addObject:)]) {
+                ((void (*)(id, SEL, id))objc_msgSend)(transitions, @selector(addObject:), transaction);
                 tracked = YES;
             }
             Call0(transaction, @"begin");
-            CLog(@"host: transaction=%@ tracked=%d", NSStringFromClass([transaction class]), tracked);
+            CLog(@"host: transaction=%@ tracked=%d transitions=%@",
+                 NSStringFromClass([transaction class]),
+                 tracked,
+                 transitions ? NSStringFromClass([transitions class]) : @"(nil)");
         } else {
             CLog(@"host: no scene update transaction");
         }
@@ -464,6 +501,38 @@ static void ConfigureAppViewController(id viewController, id entity)
         }
     } else {
         CLog(@"host: no scene view for display mode");
+    }
+}
+
+static void LogHostedState(id application, id handle, UIView *appView, UIView *sceneView)
+{
+    CLog(@"host: state processState=%ld running=%d",
+         (long)IntReturn(application, @"processState", -1),
+         BoolReturn(application, @"isRunning", NO));
+    
+    id scene = Call0(handle, @"sceneIfExists");
+    CLog(@"host: state scene=%@ active=%d",
+         scene ? NSStringFromClass([scene class]) : @"(nil)",
+         BoolReturn(scene, @"isActive", NO));
+    
+    CLog(@"host: state view frame=%@ hidden=%d alpha=%.2f window=%@",
+         NSStringFromCGRect(appView.frame),
+         appView.hidden,
+         appView.alpha,
+         NSStringFromClass([appView.window class]));
+    
+    for (UIView *subview in appView.subviews) {
+        CLog(@"host: state sub %@ frame=%@ hidden=%d alpha=%.2f",
+             NSStringFromClass([subview class]),
+             NSStringFromCGRect(subview.frame),
+             subview.hidden,
+             subview.alpha);
+    }
+    
+    if (sceneView) {
+        CLog(@"host: state sceneView frame=%@ transform=%@",
+             NSStringFromCGRect([(UIView *)sceneView frame]),
+             NSStringFromCGAffineTransform([(UIView *)sceneView transform]));
     }
 }
 
@@ -626,6 +695,11 @@ static id HostApplication(NSString *bundleID, UIView *container)
     }
     
     CLog(@"host: %@ attached", bundleID);
+    
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        LogHostedState(application, handle, appView, sceneView);
+    });
+    
     return viewController;
 }
 
@@ -878,7 +952,7 @@ static void CockpitInit(void)
             return;
         }
         
-        CLog(@"--- Cockpit 0.0.6 loaded ---");
+        CLog(@"--- Cockpit 0.0.7 loaded ---");
         
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
             LogPrefsState();
