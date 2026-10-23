@@ -147,11 +147,19 @@ done | grep -i didi
 touch /var/mobile/Library/Preferences/lilliana.cockpit.off
 ```
 
+如果上一次托管时 SpringBoard 崩了，tweak 会留下崩溃保护标记：
+
+```
+/var/mobile/Library/Preferences/lilliana.cockpit.hosting
+```
+
+下次启动看到它只显示蓝色探针、**不托管 App**，并自动删掉标记；再 respring 一次就会重新尝试托管。想立刻恢复托管，删掉这个文件再 respring。
+
 ## 日志
 
 `/var/mobile/Library/Logs/Cockpit.log`（256 KB 轮转），记录：
 
-- `--- Cockpit 0.0.5 loaded ---`：tweak 被加载
+- `--- Cockpit 0.0.6 loaded ---`：tweak 被加载
 - `probe: screens`：车机屏是否被识别，`car=1` / `carplay=1`
 - `make window: ...`：窗口是否创建成功，frame 是多少
 - `ui: no HostBundleID set, probe only`：没有配置宿主的 App
