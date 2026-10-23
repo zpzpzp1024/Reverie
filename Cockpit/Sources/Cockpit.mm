@@ -195,8 +195,8 @@ static NSString *HostBundleID(void)
         return text;
     }
     
-    // Default host: Settings (safe for testing)
-    return @"com.apple.Preferences";
+    // Default host: DiDi (ride-hailing app for CarPlay)
+    return @"com.xiaojukeji.didi";
 }
 
 static void LogPrefsState(void)
@@ -1121,7 +1121,7 @@ static void CockpitInit(void)
             return;
         }
         
-        CLog(@"--- Cockpit 0.0.15 loaded ---");
+        CLog(@"--- Cockpit 0.0.16 loaded ---");
         InstallCrashHandlers();
         
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
