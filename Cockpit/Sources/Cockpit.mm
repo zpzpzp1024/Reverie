@@ -195,8 +195,8 @@ static NSString *HostBundleID(void)
         return text;
     }
     
-    // Default host: DiDi passenger app
-    return @"com.xiaojukeji.didi";
+    // Default host: Settings (safe for testing)
+    return @"com.apple.Preferences";
 }
 
 static void LogPrefsState(void)
@@ -501,27 +501,6 @@ static BOOL SetObjectIvar(id object, NSString *name, id value)
     return YES;
 }
 
-// -1 = auto (apply after the app process is up), -2 = never, >= 0 = immediately
-static NSInteger ConfiguredMode(void)
-{
-    NSString *path = @COCKPIT_MODE;
-    if (![[NSFileManager defaultManager] fileExistsAtPath:path]) {
-        return -1;
-    }
-    NSString *text = [[NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil]
-                      stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    if (text.length == 0) {
-        return -1;
-    }
-    NSString *lower = text.lowercaseString;
-    if ([lower isEqualToString:@"auto"]) {
-        return -1;
-    }
-    if ([lower isEqualToString:@"none"] || [lower isEqualToString:@"off"]) {
-        return -2;
-    }
-    return text.integerValue;
-}
 
 static BOOL SetCurrentMode(id viewController, NSInteger mode)
 {
@@ -546,14 +525,17 @@ static BOOL SetCurrentMode(id viewController, NSInteger mode)
 // SpringBoard's scene controller believe the foreground flag changed behind its
 // back, and it raises NSInternalInconsistencyException. So in auto mode we wait
 // for the process to exist and only then go live.
+// With the transaction + mode 2 applied up front, the app process should
+// come up on its own. This poller just re-applies mode 2 as a belt-and-
+// suspenders measure and logs the transition.
 static void ApplyModeWhenReady(id viewController, id application, NSInteger mode, int attempt)
 {
-    if (mode != -1 || !viewController) {
+    if (!viewController) {
         return;
     }
     
     BOOL running = BoolReturn(application, @"isRunning", NO);
-    CLog(@"mode: auto attempt=%d running=%d", attempt, running);
+    CLog(@"mode: poll attempt=%d running=%d", attempt, running);
     
     if (running) {
         BOOL ok = SetCurrentMode(viewController, 2);
@@ -561,12 +543,12 @@ static void ApplyModeWhenReady(id viewController, id application, NSInteger mode
         return;
     }
     
-    if (attempt < 8) {
+    if (attempt < 15) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
             ApplyModeWhenReady(viewController, application, mode, attempt + 1);
         });
     } else {
-        CLog(@"mode: app never started, staying passive");
+        CLog(@"mode: app never started after 30s, staying passive");
     }
 }
 
@@ -574,20 +556,21 @@ static void ApplyModeWhenReady(id viewController, id application, NSInteger mode
 // _activeTransitions and begun before _createSceneViewController, and the
 // scene view wants displayMode 4 afterwards. Skipping these leaves the view
 // controller in a half-committed state that SpringBoard eventually trips over.
+//
+// The scene update transaction with deliveringActions:YES is what actually
+// tells SpringBoard to bring the app process up. Without it the scene handle
+// exists but the app is never launched.
 static void ConfigureAppViewController(id viewController, id entity, id application)
 {
     SEL ignoresSel = NSSelectorFromString(@"setIgnoresOcclusions:");
     if ([viewController respondsToSelector:ignoresSel]) {
-        ((void (*)(id, SEL, BOOL))objc_msgSend)(viewController, ignoresSel, NO);
+        ((void (*)(id, SEL, BOOL))objc_msgSend)(viewController, ignoresSel, YES);
     }
     
-    NSInteger mode = ConfiguredMode();
-    CLog(@"host: mode config=%ld (auto=-1 none=-2)", (long)mode);
-    if (mode >= 0) {
-        CLog(@"host: currentMode immediate=%d", SetCurrentMode(viewController, mode));
-    } else {
-        CLog(@"host: currentMode left at default");
-    }
+    // Apply mode 2 (foreground/active) immediately. The scene transaction
+    // below carries this intent to the app process.
+    SetCurrentMode(viewController, 2);
+    CLog(@"host: currentMode set to 2 (foreground)");
     
     id activationSettings = Call0(viewController, @"_activationSettings");
     CLog(@"host: activationSettings=%@",
@@ -663,40 +646,59 @@ static void LogHostedState(id application, id handle, UIView *appView, UIView *s
     }
 }
 
-// The scene controller expects the scene's real foreground state, so the app
-// has to exist before the controller goes live. Launching it the normal way is
-// the only supported path to that state.
-static BOOL LaunchApplication(NSString *bundleID)
+// In SpringBoard's process the external launch helpers (SBSLaunch*, 
+// LSApplicationWorkspace) don't work — they're for other processes talking
+// *to* SpringBoard. Instead we ask SBApplicationController to activate the
+// app directly, and fall back to the scene transaction itself pulling the
+// process up.
+static BOOL LaunchApplication(id application)
 {
-    if (bundleID.length == 0) {
+    if (!application) {
         return NO;
     }
     
-    void *services = dlopen("/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices", RTLD_LAZY);
-    if (services) {
-        typedef int (*CockpitLaunchFunction)(CFStringRef, Boolean);
-        CockpitLaunchFunction launch = (CockpitLaunchFunction)dlsym(services, "SBSLaunchApplicationWithIdentifier");
-        if (launch) {
-            int result = launch((__bridge CFStringRef)bundleID, false);
-            CLog(@"launch: SBSLaunchApplicationWithIdentifier(%@)=%d", bundleID, result);
-            if (result == 0) {
+    // SBApplicationController has activateApplicationFromNib: and similar
+    // activation selectors that work from inside SpringBoard.
+    Class appControllerClass = NSClassFromString(@"SBApplicationController");
+    id appController = CallClass0(appControllerClass, @"sharedInstance");
+    if (!appController) {
+        CLog(@"launch: no SBApplicationController");
+        return NO;
+    }
+    
+    // Try the most common activation selectors.
+    SEL activateSels[] = {
+        NSSelectorFromString(@"activateApplicationFromNib:"),
+        NSSelectorFromString(@"activateApplication:"),
+        NSSelectorFromString(@"launchApplication:"),
+        NSSelectorFromString(@"presentApplication:"),
+    };
+    for (int i = 0; i < 4; i++) {
+        if ([appController respondsToSelector:activateSels[i]]) {
+            @try {
+                ((void (*)(id, SEL, id))objc_msgSend)(appController, activateSels[i], application);
+                CLog(@"launch: %@ succeeded", NSStringFromSelector(activateSels[i]));
                 return YES;
+            } @catch (NSException *e) {
+                CLog(@"launch: %@ threw %@", NSStringFromSelector(activateSels[i]), e.reason);
             }
-        } else {
-            CLog(@"launch: SBSLaunchApplicationWithIdentifier missing");
         }
     }
     
-    Class workspaceClass = NSClassFromString(@"LSApplicationWorkspace");
-    id workspace = workspaceClass ? CallClass0(workspaceClass, @"defaultWorkspace") : nil;
-    SEL openSel = NSSelectorFromString(@"openApplicationWithBundleID:");
-    if (workspace && [workspace respondsToSelector:openSel]) {
-        BOOL opened = ((BOOL (*)(id, SEL, id))objc_msgSend)(workspace, openSel, bundleID);
-        CLog(@"launch: openApplicationWithBundleID(%@)=%d", bundleID, opened);
-        return opened;
+    // Dump all selectors containing "activate" or "launch" for diagnostics.
+    unsigned int count = 0;
+    Method *methods = class_copyMethodList([appControllerClass class], &count);
+    NSMutableArray<NSString *> *matches = [NSMutableArray array];
+    for (unsigned int i = 0; i < count; i++) {
+        NSString *name = NSStringFromSelector(method_getName(methods[i]));
+        if ([name.lowercaseString containsString:@"activate"] || [name.lowercaseString containsString:@"launch"]) {
+            [matches addObject:name];
+        }
     }
+    free(methods);
+    CLog(@"launch: SBApplicationController activate/launch selectors: %@",
+         [matches componentsJoinedByString:@" | "]);
     
-    CLog(@"launch: no launch path for %@", bundleID);
     return NO;
 }
 
@@ -715,16 +717,13 @@ static id HostApplication(NSString *bundleID, UIView *container)
     }
     CLog(@"host: application=%@", NSStringFromClass([application class]));
     
-    // Launch the app process so the scene has something to host. Without this
-    // isRunning stays NO forever and the mode never goes live.
+    // Try to activate the app from inside SpringBoard. The scene transaction
+    // below may also pull the process up on its own.
     BOOL alreadyRunning = BoolReturn(application, @"isRunning", NO);
     if (!alreadyRunning) {
-        CLog(@"host: %@ not running, launching…", bundleID);
-        BOOL launched = LaunchApplication(bundleID);
+        CLog(@"host: %@ not running, activating…", bundleID);
+        BOOL launched = LaunchApplication(application);
         CLog(@"host: launch result=%d", launched);
-        if (!launched) {
-            CLog(@"host: launch failed, scene will be empty");
-        }
     } else {
         CLog(@"host: %@ already running", bundleID);
     }
@@ -821,12 +820,10 @@ static id HostApplication(NSString *bundleID, UIView *container)
     
     ConfigureAppViewController(viewController, entity, application);
     
-    NSInteger configuredMode = ConfiguredMode();
-    if (configuredMode == -1) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-            ApplyModeWhenReady(viewController, application, configuredMode, 1);
-        });
-    }
+    // Always poll for the app becoming running and re-apply mode 2.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        ApplyModeWhenReady(viewController, application, -1, 1);
+    });
     
     UIView *appView = Call0(viewController, @"view");
     if (!appView) {
@@ -1143,7 +1140,7 @@ static void CockpitInit(void)
             return;
         }
         
-        CLog(@"--- Cockpit 0.0.12 loaded ---");
+        CLog(@"--- Cockpit 0.0.13 loaded ---");
         InstallCrashHandlers();
         
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
