@@ -215,6 +215,35 @@ static void LogClassSelector(Class cls, NSString *selector, BOOL classMethod)
     CLog(@"api: %@ %c%@ = %d", NSStringFromClass(cls), classMethod ? '+' : '-', selector, found);
 }
 
+static void LogSelectors(Class cls, NSArray<NSString *> *keywords)
+{
+    if (!cls) {
+        return;
+    }
+    
+    unsigned int count = 0;
+    Method *methods = class_copyMethodList(cls, &count);
+    NSMutableArray<NSString *> *matches = [NSMutableArray array];
+    
+    for (unsigned int index = 0; index < count; index++) {
+        NSString *name = NSStringFromSelector(method_getName(methods[index]));
+        NSString *lowercase = name.lowercaseString;
+        for (NSString *keyword in keywords) {
+            if ([lowercase containsString:keyword]) {
+                [matches addObject:name];
+                break;
+            }
+        }
+    }
+    free(methods);
+    
+    [matches sortUsingSelector:@selector(compare:)];
+    CLog(@"api: %@ scene/identity (%lu): %@",
+         NSStringFromClass(cls),
+         (unsigned long)matches.count,
+         [matches componentsJoinedByString:@" | "]);
+}
+
 static void LogHostingAPI(void)
 {
     Class coordinator = NSClassFromString(@"SBSceneManagerCoordinator");
@@ -250,6 +279,14 @@ static void LogHostingAPI(void)
         id displayIdentity = Call0(sceneManager, @"displayIdentity");
         CLog(@"api: displayIdentity=%@", displayIdentity ? NSStringFromClass([displayIdentity class]) : @"nil");
     }
+    
+    NSArray<NSString *> *keywords = @[@"scene", @"identity"];
+    LogSelectors(manager, keywords);
+    Class mainManager = NSClassFromString(@"SBMainDisplaySceneManager");
+    if (mainManager && mainManager != manager) {
+        LogSelectors(mainManager, keywords);
+    }
+    LogSelectors(NSClassFromString(@"SBApplication"), keywords);
 }
 
 static id CarDisplay(void)
@@ -384,30 +421,62 @@ static id HostApplication(NSString *bundleID, UIView *container)
         return nil;
     }
     
-    SEL identitySel = NSSelectorFromString(@"_sceneIdentityForApplication:createPrimaryIfRequired:");
     id sceneIdentity = nil;
+    SEL identitySel = NSSelectorFromString(@"_sceneIdentityForApplication:createPrimaryIfRequired:");
     if ([sceneManager respondsToSelector:identitySel]) {
         sceneIdentity = ((id (*)(id, SEL, id, BOOL))objc_msgSend)(sceneManager, identitySel, application, YES);
+        CLog(@"host: identity via _sceneIdentityForApplication:createPrimaryIfRequired: = %@",
+             sceneIdentity ? NSStringFromClass([sceneIdentity class]) : @"nil");
     }
     if (!sceneIdentity) {
-        CLog(@"host: no scene identity");
-        return nil;
+        sceneIdentity = Call1(sceneManager, @"sceneIdentityForApplication:", application);
+        if (sceneIdentity) {
+            CLog(@"host: identity via sceneIdentityForApplication: = %@", NSStringFromClass([sceneIdentity class]));
+        }
     }
+    if (!sceneIdentity) {
+        sceneIdentity = Call1(sceneManager, @"_sceneIdentityForApplication:", application);
+        if (sceneIdentity) {
+            CLog(@"host: identity via _sceneIdentityForApplication: = %@", NSStringFromClass([sceneIdentity class]));
+        }
+    }
+    if (!sceneIdentity) {
+        sceneIdentity = Call0(application, @"primarySceneIdentity");
+        if (sceneIdentity) {
+            CLog(@"host: identity via application.primarySceneIdentity = %@", NSStringFromClass([sceneIdentity class]));
+        }
+    }
+    if (!sceneIdentity) {
+        sceneIdentity = Call0(application, @"sceneIdentity");
+        if (sceneIdentity) {
+            CLog(@"host: identity via application.sceneIdentity = %@", NSStringFromClass([sceneIdentity class]));
+        }
+    }
+    CLog(@"host: sceneIdentity=%@ class=%@",
+         sceneIdentity ?: @"(nil)",
+         sceneIdentity ? NSStringFromClass([sceneIdentity class]) : @"(nil)");
     
     id displayIdentity = Call0(sceneManager, @"displayIdentity");
     
     Class requestClass = NSClassFromString(@"SBApplicationSceneHandleRequest");
-    id request = CallClass2(requestClass, @"defaultRequestForApplication:sceneIdentity:displayIdentity:", application, sceneIdentity, displayIdentity);
+    id request = nil;
+    @try {
+        request = CallClass2(requestClass, @"defaultRequestForApplication:sceneIdentity:displayIdentity:", application, sceneIdentity, displayIdentity);
+    } @catch (NSException *exception) {
+        CLog(@"host: request threw %@: %@", exception.name, exception.reason);
+    }
     if (!request) {
         CLog(@"host: no scene handle request");
         return nil;
     }
+    CLog(@"host: request=%@", NSStringFromClass([request class]));
     
     id handle = Call1(sceneManager, @"fetchOrCreateApplicationSceneHandleForRequest:", request);
     if (!handle) {
         CLog(@"host: no scene handle");
         return nil;
     }
+    CLog(@"host: handle=%@", NSStringFromClass([handle class]));
     
     Class entityClass = NSClassFromString(@"SBDeviceApplicationSceneEntity");
     id entity = Call1([entityClass alloc], @"initWithApplicationSceneHandle:", handle);
@@ -699,7 +768,7 @@ static void CockpitInit(void)
             return;
         }
         
-        CLog(@"--- Cockpit 0.0.4 loaded ---");
+        CLog(@"--- Cockpit 0.0.5 loaded ---");
         
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
             LogPrefsState();

@@ -151,7 +151,7 @@ touch /var/mobile/Library/Preferences/lilliana.cockpit.off
 
 `/var/mobile/Library/Logs/Cockpit.log`（256 KB 轮转），记录：
 
-- `--- Cockpit 0.0.4 loaded ---`：tweak 被加载
+- `--- Cockpit 0.0.5 loaded ---`：tweak 被加载
 - `probe: screens`：车机屏是否被识别，`car=1` / `carplay=1`
 - `make window: ...`：窗口是否创建成功，frame 是多少
 - `ui: no HostBundleID set, probe only`：没有配置宿主的 App
