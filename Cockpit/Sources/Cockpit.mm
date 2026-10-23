@@ -159,7 +159,7 @@ static BOOL BoolReturn(id object, NSString *selector, BOOL fallback)
 
 #pragma mark - CarPlay display
 
-static CADisplay *CarDisplay(void)
+static id CarDisplay(void)
 {
     Class deviceClass = NSClassFromString(@"AVExternalDevice");
     id device = CallClass0(deviceClass, @"currentCarPlayExternalDevice");
@@ -197,7 +197,7 @@ static UIScreen *CarScreen(void)
 
 static UIWindow *MakeCarWindow(void)
 {
-    CADisplay *display = CarDisplay();
+    id display = CarDisplay();
     if (!display) {
         CLog(@"make window: no CarPlay CADisplay");
         return nil;
