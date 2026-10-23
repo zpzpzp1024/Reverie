@@ -48,6 +48,12 @@ killall -9 SpringBoard
 - `SplitRatio`：左半屏占比，0.25–0.75
 - `HostBundleID`：要挂到左半屏的 App，留空就只显示探针色块
 
+   也可以不用 plist，直接建一个纯文本文件，内容只写包名：
+
+   ```
+   /var/mobile/Library/Preferences/lilliana.cockpit.host
+   ```
+
 `HostBundleID` 不知道的话，用 Filza 找到那个 App 的 `.app` 目录，看里面 `Info.plist` 的 `CFBundleIdentifier`；或者在 SSH 里：
 
 ```sh
@@ -91,7 +97,7 @@ touch /var/mobile/Library/Preferences/lilliana.cockpit.off
 
 `/var/mobile/Library/Logs/Cockpit.log`（256 KB 轮转），记录：
 
-- `--- Cockpit 0.0.3 loaded ---`：tweak 被加载
+- `--- Cockpit 0.0.4 loaded ---`：tweak 被加载
 - `probe: screens`：车机屏是否被识别，`car=1` / `carplay=1`
 - `make window: ...`：窗口是否创建成功，frame 是多少
 - `ui: no HostBundleID set, probe only`：没有配置宿主的 App

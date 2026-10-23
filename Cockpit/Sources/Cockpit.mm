@@ -208,6 +208,50 @@ static BOOL BoolReturn(id object, NSString *selector, BOOL fallback)
 
 #pragma mark - CarPlay display
 
+static void LogClassSelector(Class cls, NSString *selector, BOOL classMethod)
+{
+    SEL sel = NSSelectorFromString(selector);
+    BOOL found = classMethod ? [cls respondsToSelector:sel] : [cls instancesRespondToSelector:sel];
+    CLog(@"api: %@ %c%@ = %d", NSStringFromClass(cls), classMethod ? '+' : '-', selector, found);
+}
+
+static void LogHostingAPI(void)
+{
+    Class coordinator = NSClassFromString(@"SBSceneManagerCoordinator");
+    Class manager = NSClassFromString(@"SBSceneManager");
+    Class request = NSClassFromString(@"SBApplicationSceneHandleRequest");
+    Class controller = NSClassFromString(@"SBAppViewController");
+    Class entity = NSClassFromString(@"SBDeviceApplicationSceneEntity");
+    Class appController = NSClassFromString(@"SBApplicationController");
+    
+    CLog(@"api: classes coordinator=%d manager=%d request=%d appVC=%d entity=%d appController=%d",
+         coordinator != nil, manager != nil, request != nil,
+         controller != nil, entity != nil, appController != nil);
+    
+    LogClassSelector(coordinator, @"mainDisplaySceneManager", YES);
+    LogClassSelector(manager, @"displayIdentity", NO);
+    LogClassSelector(manager, @"_sceneIdentityForApplication:createPrimaryIfRequired:", NO);
+    LogClassSelector(manager, @"fetchOrCreateApplicationSceneHandleForRequest:", NO);
+    LogClassSelector(request, @"defaultRequestForApplication:sceneIdentity:displayIdentity:", YES);
+    LogClassSelector(request, @"requestForApplication:sceneIdentity:displayIdentity:", YES);
+    LogClassSelector(controller, @"initWithIdentifier:andApplicationSceneEntity:", NO);
+    LogClassSelector(controller, @"initWithApplicationSceneEntity:", NO);
+    LogClassSelector(controller, @"_createSceneViewController", NO);
+    LogClassSelector(controller, @"_createSceneUpdateTransactionForApplicationSceneEntity:deliveringActions:", NO);
+    LogClassSelector(controller, @"setIgnoresOcclusions:", NO);
+    LogClassSelector(controller, @"_setCurrentMode:", NO);
+    LogClassSelector(entity, @"initWithApplicationSceneHandle:", NO);
+    LogClassSelector(appController, @"sharedInstance", YES);
+    LogClassSelector(appController, @"applicationWithBundleIdentifier:", NO);
+    
+    id sceneManager = CallClass0(coordinator, @"mainDisplaySceneManager");
+    CLog(@"api: mainDisplaySceneManager=%@", sceneManager ? NSStringFromClass([sceneManager class]) : @"nil");
+    if (sceneManager) {
+        id displayIdentity = Call0(sceneManager, @"displayIdentity");
+        CLog(@"api: displayIdentity=%@", displayIdentity ? NSStringFromClass([displayIdentity class]) : @"nil");
+    }
+}
+
 static id CarDisplay(void)
 {
     Class deviceClass = NSClassFromString(@"AVExternalDevice");
@@ -375,6 +419,12 @@ static id HostApplication(NSString *bundleID, UIView *container)
     Class vcClass = NSClassFromString(@"SBAppViewController");
     id viewController = Call2([vcClass alloc], @"initWithIdentifier:andApplicationSceneEntity:", bundleID, entity);
     if (!viewController) {
+        viewController = Call1([vcClass alloc], @"initWithApplicationSceneEntity:", entity);
+        if (viewController) {
+            CLog(@"host: used initWithApplicationSceneEntity: fallback");
+        }
+    }
+    if (!viewController) {
         CLog(@"host: no app view controller");
         return nil;
     }
@@ -402,6 +452,10 @@ static id HostApplication(NSString *bundleID, UIView *container)
     appView.frame = container.bounds;
     appView.backgroundColor = [UIColor clearColor];
     [container addSubview:appView];
+    CLog(@"host: view=%@ frame=%@ subviews=%lu",
+         NSStringFromClass([appView class]),
+         NSStringFromCGRect(appView.frame),
+         (unsigned long)appView.subviews.count);
     
     // The hosted scene renders at phone size; scale it into the pane the same
     // way CarBridge does.
@@ -645,10 +699,11 @@ static void CockpitInit(void)
             return;
         }
         
-        CLog(@"--- Cockpit 0.0.3 loaded ---");
+        CLog(@"--- Cockpit 0.0.4 loaded ---");
         
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
             LogPrefsState();
+            LogHostingAPI();
             DumpProbe();
             Tick();
             
