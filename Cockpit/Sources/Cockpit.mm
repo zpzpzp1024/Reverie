@@ -35,6 +35,7 @@
 #define COCKPIT_OFF     "/var/mobile/Library/Preferences/lilliana.cockpit.off"
 #define COCKPIT_PREFS   "/var/mobile/Library/Preferences/lilliana.cockpit.plist"
 #define COCKPIT_HOSTING "/var/mobile/Library/Preferences/lilliana.cockpit.hosting"
+#define COCKPIT_CRASHED "/var/mobile/Library/Preferences/lilliana.cockpit.crashed"
 #define COCKPIT_NEWSCENE "/var/mobile/Library/Preferences/lilliana.cockpit.newscene"
 
 static NSString *const kPrefsHostApp  = @"HostBundleID";
@@ -97,6 +98,11 @@ static void CockpitSignalHandler(int signo)
     snprintf(header, sizeof(header), "\n*** cockpit: signal %d ***\n", signo);
     CockpitWriteRaw(header);
     
+    int crashFD = open(COCKPIT_CRASHED, O_WRONLY | O_CREAT, 0644);
+    if (crashFD >= 0) {
+        close(crashFD);
+    }
+    
 #if COCKPIT_HAVE_BACKTRACE
     int fd = open(COCKPIT_LOG, O_WRONLY | O_APPEND);
     if (fd >= 0) {
@@ -117,6 +123,7 @@ static void CockpitExceptionHandler(NSException *exception)
     for (NSString *line in exception.callStackSymbols) {
         CLog(@"cockpit stack: %@", line);
     }
+    [[NSFileManager defaultManager] createFileAtPath:@COCKPIT_CRASHED contents:[NSData data] attributes:nil];
 }
 
 static void InstallCrashHandlers(void)
@@ -924,21 +931,20 @@ static void CreateInterface(BOOL testMode)
     NSString *bundleID = HostBundleID();
     if (bundleID.length) {
         NSFileManager *manager = [NSFileManager defaultManager];
+        // Older builds wrote this on every attempt; drop any leftover.
         if ([manager fileExistsAtPath:@COCKPIT_HOSTING]) {
-            // A previous attempt never reached the 25 s all-clear, which means
-            // SpringBoard died while hosting. Skip this launch so the phone
-            // does not get stuck in a crash loop.
-            CLog(@"host: previous attempt did not finish, skipping this launch");
             [manager removeItemAtPath:@COCKPIT_HOSTING error:nil];
+        }
+        
+        if ([manager fileExistsAtPath:@COCKPIT_CRASHED]) {
+            // A crash was captured last session. Skip exactly one launch so the
+            // phone cannot get stuck in a crash loop; a normal respring never
+            // writes this marker.
+            CLog(@"host: crash captured last session, skipping this launch");
+            [manager removeItemAtPath:@COCKPIT_CRASHED error:nil];
         } else {
-            [manager createFileAtPath:@COCKPIT_HOSTING contents:[NSData data] attributes:nil];
             CLog(@"ui: hosting %@ in %@ mode", bundleID, testMode ? @"test" : @"car");
             gHostController = HostApplication(bundleID, left);
-            
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 25 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-                [[NSFileManager defaultManager] removeItemAtPath:@COCKPIT_HOSTING error:nil];
-                CLog(@"host: guard cleared after 25s");
-            });
         }
     } else {
         CLog(@"ui: no HostBundleID set, probe only");
@@ -1011,7 +1017,7 @@ static void CockpitInit(void)
             return;
         }
         
-        CLog(@"--- Cockpit 0.0.8 loaded ---");
+        CLog(@"--- Cockpit 0.0.9 loaded ---");
         InstallCrashHandlers();
         
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
