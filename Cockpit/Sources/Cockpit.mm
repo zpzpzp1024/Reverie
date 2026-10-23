@@ -23,6 +23,7 @@
 #import <unistd.h>
 #import <fcntl.h>
 #import <string.h>
+#import <dlfcn.h>
 
 #if __has_include(<execinfo.h>)
 #import <execinfo.h>
@@ -190,7 +191,12 @@ static NSString *HostBundleID(void)
     
     NSString *text = [NSString stringWithContentsOfFile:@COCKPIT_HOST encoding:NSUTF8StringEncoding error:nil];
     text = [text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    return text.length ? text : nil;
+    if (text.length) {
+        return text;
+    }
+    
+    // Default host: DiDi passenger app
+    return @"com.xiaojukeji.didi";
 }
 
 static void LogPrefsState(void)
@@ -657,6 +663,43 @@ static void LogHostedState(id application, id handle, UIView *appView, UIView *s
     }
 }
 
+// The scene controller expects the scene's real foreground state, so the app
+// has to exist before the controller goes live. Launching it the normal way is
+// the only supported path to that state.
+static BOOL LaunchApplication(NSString *bundleID)
+{
+    if (bundleID.length == 0) {
+        return NO;
+    }
+    
+    void *services = dlopen("/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices", RTLD_LAZY);
+    if (services) {
+        typedef int (*CockpitLaunchFunction)(CFStringRef, Boolean);
+        CockpitLaunchFunction launch = (CockpitLaunchFunction)dlsym(services, "SBSLaunchApplicationWithIdentifier");
+        if (launch) {
+            int result = launch((__bridge CFStringRef)bundleID, false);
+            CLog(@"launch: SBSLaunchApplicationWithIdentifier(%@)=%d", bundleID, result);
+            if (result == 0) {
+                return YES;
+            }
+        } else {
+            CLog(@"launch: SBSLaunchApplicationWithIdentifier missing");
+        }
+    }
+    
+    Class workspaceClass = NSClassFromString(@"LSApplicationWorkspace");
+    id workspace = workspaceClass ? CallClass0(workspaceClass, @"defaultWorkspace") : nil;
+    SEL openSel = NSSelectorFromString(@"openApplicationWithBundleID:");
+    if (workspace && [workspace respondsToSelector:openSel]) {
+        BOOL opened = ((BOOL (*)(id, SEL, id))objc_msgSend)(workspace, openSel, bundleID);
+        CLog(@"launch: openApplicationWithBundleID(%@)=%d", bundleID, opened);
+        return opened;
+    }
+    
+    CLog(@"launch: no launch path for %@", bundleID);
+    return NO;
+}
+
 static id HostApplication(NSString *bundleID, UIView *container)
 {
     if (bundleID.length == 0) {
@@ -671,6 +714,20 @@ static id HostApplication(NSString *bundleID, UIView *container)
         return nil;
     }
     CLog(@"host: application=%@", NSStringFromClass([application class]));
+    
+    // Launch the app process so the scene has something to host. Without this
+    // isRunning stays NO forever and the mode never goes live.
+    BOOL alreadyRunning = BoolReturn(application, @"isRunning", NO);
+    if (!alreadyRunning) {
+        CLog(@"host: %@ not running, launching…", bundleID);
+        BOOL launched = LaunchApplication(bundleID);
+        CLog(@"host: launch result=%d", launched);
+        if (!launched) {
+            CLog(@"host: launch failed, scene will be empty");
+        }
+    } else {
+        CLog(@"host: %@ already running", bundleID);
+    }
     
     id sceneManager = CallClass0(NSClassFromString(@"SBSceneManagerCoordinator"), @"mainDisplaySceneManager");
     if (!sceneManager) {
@@ -1086,7 +1143,7 @@ static void CockpitInit(void)
             return;
         }
         
-        CLog(@"--- Cockpit 0.0.11 loaded ---");
+        CLog(@"--- Cockpit 0.0.12 loaded ---");
         InstallCrashHandlers();
         
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
