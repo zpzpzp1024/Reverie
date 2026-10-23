@@ -19,11 +19,23 @@
 #import <objc/message.h>
 #import <stdarg.h>
 #import <stdio.h>
+#import <signal.h>
+#import <unistd.h>
+#import <fcntl.h>
+#import <string.h>
+
+#if __has_include(<execinfo.h>)
+#import <execinfo.h>
+#define COCKPIT_HAVE_BACKTRACE 1
+#else
+#define COCKPIT_HAVE_BACKTRACE 0
+#endif
 
 #define COCKPIT_LOG     "/var/mobile/Library/Logs/Cockpit.log"
 #define COCKPIT_OFF     "/var/mobile/Library/Preferences/lilliana.cockpit.off"
 #define COCKPIT_PREFS   "/var/mobile/Library/Preferences/lilliana.cockpit.plist"
 #define COCKPIT_HOSTING "/var/mobile/Library/Preferences/lilliana.cockpit.hosting"
+#define COCKPIT_NEWSCENE "/var/mobile/Library/Preferences/lilliana.cockpit.newscene"
 
 static NSString *const kPrefsHostApp  = @"HostBundleID";
 static NSString *const kPrefsRatio    = @"SplitRatio";
@@ -66,6 +78,56 @@ static void CLog(NSString *format, ...)
         fputs(line.UTF8String, file);
         fclose(file);
     }
+}
+
+#pragma mark - Crash capture
+
+static void CockpitWriteRaw(const char *text)
+{
+    int fd = open(COCKPIT_LOG, O_WRONLY | O_APPEND | O_CREAT, 0644);
+    if (fd >= 0) {
+        write(fd, text, strlen(text));
+        close(fd);
+    }
+}
+
+static void CockpitSignalHandler(int signo)
+{
+    char header[96];
+    snprintf(header, sizeof(header), "\n*** cockpit: signal %d ***\n", signo);
+    CockpitWriteRaw(header);
+    
+#if COCKPIT_HAVE_BACKTRACE
+    int fd = open(COCKPIT_LOG, O_WRONLY | O_APPEND);
+    if (fd >= 0) {
+        void *frames[64];
+        int count = backtrace(frames, 64);
+        backtrace_symbols_fd(frames, count, fd);
+        close(fd);
+    }
+#endif
+    
+    signal(signo, SIG_DFL);
+    raise(signo);
+}
+
+static void CockpitExceptionHandler(NSException *exception)
+{
+    CLog(@"*** cockpit: uncaught %@: %@", exception.name, exception.reason);
+    for (NSString *line in exception.callStackSymbols) {
+        CLog(@"cockpit stack: %@", line);
+    }
+}
+
+static void InstallCrashHandlers(void)
+{
+    NSSetUncaughtExceptionHandler(&CockpitExceptionHandler);
+    signal(SIGABRT, CockpitSignalHandler);
+    signal(SIGSEGV, CockpitSignalHandler);
+    signal(SIGBUS, CockpitSignalHandler);
+    signal(SIGILL, CockpitSignalHandler);
+    signal(SIGFPE, CockpitSignalHandler);
+    signal(SIGTRAP, CockpitSignalHandler);
 }
 
 #pragma mark - Preferences
@@ -205,15 +267,6 @@ static BOOL BoolReturn(id object, NSString *selector, BOOL fallback)
         return fallback;
     }
     return ((BOOL (*)(id, SEL))objc_msgSend)(object, sel);
-}
-
-static NSInteger IntReturn(id object, NSString *selector, NSInteger fallback)
-{
-    SEL sel = NSSelectorFromString(selector);
-    if (!object || ![object respondsToSelector:sel]) {
-        return fallback;
-    }
-    return ((NSInteger (*)(id, SEL))objc_msgSend)(object, sel);
 }
 
 static void CallInteger(id object, NSString *selector, NSInteger value)
@@ -497,7 +550,8 @@ static void ConfigureAppViewController(id viewController, id entity)
         id factory = CallClass0(NSClassFromString(@"SBApplicationSceneView"), @"defaultDisplayModeAnimationFactory");
         if ([sceneView respondsToSelector:displaySel]) {
             ((void (*)(id, SEL, NSInteger, id, id))objc_msgSend)(sceneView, displaySel, (NSInteger)4, factory, nil);
-            CLog(@"host: displayMode 4 applied");
+            CLog(@"host: displayMode 4 applied (factory=%@)",
+                 factory ? NSStringFromClass([factory class]) : @"(nil)");
         }
     } else {
         CLog(@"host: no scene view for display mode");
@@ -506,9 +560,7 @@ static void ConfigureAppViewController(id viewController, id entity)
 
 static void LogHostedState(id application, id handle, UIView *appView, UIView *sceneView)
 {
-    CLog(@"host: state processState=%ld running=%d",
-         (long)IntReturn(application, @"processState", -1),
-         BoolReturn(application, @"isRunning", NO));
+    CLog(@"host: state running=%d", BoolReturn(application, @"isRunning", NO));
     
     id scene = Call0(handle, @"sceneIfExists");
     CLog(@"host: state scene=%@ active=%d",
@@ -558,6 +610,13 @@ static id HostApplication(NSString *bundleID, UIView *container)
     }
     
     id sceneIdentity = nil;
+    if ([[NSFileManager defaultManager] fileExistsAtPath:@COCKPIT_NEWSCENE]) {
+        CLog(@"host: newscene marker present, requesting a separate scene");
+        sceneIdentity = Call1(sceneManager, @"newSceneIdentityForApplication:", application);
+        CLog(@"host: newSceneIdentityForApplication: = %@",
+             sceneIdentity ? sceneIdentity : @"(nil)");
+    }
+    
     SEL identitySel = NSSelectorFromString(@"_sceneIdentityForApplication:createPrimaryIfRequired:");
     if ([sceneManager respondsToSelector:identitySel]) {
         sceneIdentity = ((id (*)(id, SEL, id, BOOL))objc_msgSend)(sceneManager, identitySel, application, YES);
@@ -952,7 +1011,8 @@ static void CockpitInit(void)
             return;
         }
         
-        CLog(@"--- Cockpit 0.0.7 loaded ---");
+        CLog(@"--- Cockpit 0.0.8 loaded ---");
+        InstallCrashHandlers();
         
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
             LogPrefsState();

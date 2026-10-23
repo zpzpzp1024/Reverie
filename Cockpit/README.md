@@ -155,11 +155,19 @@ touch /var/mobile/Library/Preferences/lilliana.cockpit.off
 
 下次启动看到它只显示蓝色探针、**不托管 App**，并自动删掉标记；再 respring 一次就会重新尝试托管。想立刻恢复托管，删掉这个文件再 respring。
 
+想让 App 用一个**独立的场景**而不是系统默认场景（避免和桌面上的同一个 App 抢），建这个文件再 respring：
+
+```
+/var/mobile/Library/Preferences/lilliana.cockpit.newscene
+```
+
+日志里会打 `host: newSceneIdentityForApplication: = ...`。
+
 ## 日志
 
 `/var/mobile/Library/Logs/Cockpit.log`（256 KB 轮转），记录：
 
-- `--- Cockpit 0.0.7 loaded ---`：tweak 被加载
+- `--- Cockpit 0.0.8 loaded ---`：tweak 被加载
 - `probe: screens`：车机屏是否被识别，`car=1` / `carplay=1`
 - `make window: ...`：窗口是否创建成功，frame 是多少
 - `ui: no HostBundleID set, probe only`：没有配置宿主的 App
