@@ -18,7 +18,7 @@
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)][string]$Device,
+    [string]$Device,
     [string]$Deb,
     [switch]$Latest,
     [switch]$NoRespring,
@@ -30,6 +30,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+if (-not $Device) { $Device = $env:COCKPIT_DEVICE }
+if (-not $Device) { throw 'Pass -Device <ip> or set COCKPIT_DEVICE' }
 
 $sshOptions = @(
     '-o', 'StrictHostKeyChecking=accept-new',

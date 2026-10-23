@@ -53,6 +53,7 @@ type $env:USERPROFILE\.ssh\id_ed25519.pub | ssh root@<手机IP> "mkdir -p /var/r
 
 ```powershell
 # 装最新一版（CI 每次构建都会更新 cockpit-latest 这个 release）
+# 也可以先设一次 $env:COCKPIT_DEVICE="192.168.1.23"，之后省略 -Device
 .\Cockpit\deploy.ps1 -Device 192.168.1.23 -Latest
 
 # 装本地某个包
