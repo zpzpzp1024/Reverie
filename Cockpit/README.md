@@ -27,6 +27,59 @@ killall -9 SpringBoard
 > 会注入 SpringBoard。如果出现无限重启，用 Dopamine 关闭 tweak 注入后重启，或删掉
 > `/var/jb/Library/MobileSubstrate/DynamicLibraries/Cockpit.dylib`。
 
+## SSH 部署（推荐）
+
+手机装一次 OpenSSH，之后每次迭代就是一条命令，不用再来回传包、翻 Filza。
+
+**一次性准备：**
+
+1. Sileo 里搜 `openssh` 安装（Procursus 源的 openssh，装完 sshd 就在 22 端口）
+2. 查手机 IP：设置 → Wi-Fi → 点右边 `(i)` → IP 地址
+3. 电脑上：
+
+```powershell
+ssh root@<手机IP>        # 默认密码 alpine
+passwd                   # 进去后先把密码改掉
+```
+
+4. 配免密（强烈建议，否则脚本每次 ssh/scp 都会要密码）：
+
+```powershell
+ssh-keygen -t ed25519     # 已有 key 就跳过
+type $env:USERPROFILE\.ssh\id_ed25519.pub | ssh root@<手机IP> "mkdir -p /var/root/.ssh; cat >> /var/root/.ssh/authorized_keys; chmod 700 /var/root/.ssh; chmod 600 /var/root/.ssh/authorized_keys"
+```
+
+**日常用法：**
+
+```powershell
+# 装最新一版（自动从 GitHub releases 下载 cockpit-* 的最新 deb）
+.\Cockpit\deploy.ps1 -Device 192.168.1.23 -Latest
+
+# 装本地某个包
+.\Cockpit\deploy.ps1 -Device 192.168.1.23 -Deb .\Cockpit\packages\lilliana.cockpit_0.0.4_iphoneos-arm64.deb
+
+# 只看日志（不装包）
+.\Cockpit\deploy.ps1 -Device 192.168.1.23 -LogOnly -Tail 120
+
+# 实时跟日志
+.\Cockpit\deploy.ps1 -Device 192.168.1.23 -LogOnly -Follow
+
+# 装完不 respring（只换文件）
+.\Cockpit\deploy.ps1 -Device 192.168.1.23 -Latest -NoRespring
+
+# 顺手把日志存到本地
+.\Cockpit\deploy.ps1 -Device 192.168.1.23 -LogOnly -SaveLog .\cockpit.log
+```
+
+脚本做的事：确认能连上 → `scp` 到 `/var/mobile/cockpit.deb` → `dpkg -i` → 确认 dylib 落地 → `killall -9 SpringBoard` → 等 8 秒 → 打印 `/var/mobile/Library/Logs/Cockpit.log`。
+
+**连不上时：**
+
+- 手机和电脑必须同一 Wi-Fi，路由器别开 AP 隔离
+- IP 变了（重连 Wi-Fi 常见），重新查一下
+- 确认 sshd 在跑：`ssh root@<IP> "launchctl list | grep -i ssh"`
+- 手机锁屏不影响 sshd，但省电模式可能断 Wi-Fi
+
 ## 配置
 
 配置文件：`/var/mobile/Library/Preferences/lilliana.cockpit.plist`

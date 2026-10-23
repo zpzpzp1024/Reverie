@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   package:
@@ -64,3 +64,17 @@ jobs:
           name: cockpit-deb
           path: Cockpit/packages/*.deb
           if-no-files-found: error
+
+      # A single rolling release so `deploy.ps1 -Latest` always fetches the
+      # newest build without a token and without waiting for a version tag.
+      - name: Publish rolling release
+        if: github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: cockpit-latest
+          name: Cockpit (latest build)
+          body: Rolling build from ${{ github.sha }}
+          prerelease: true
+          make_latest: false
+          files: Cockpit/packages/*.deb
+          fail_on_unmatched_files: true
