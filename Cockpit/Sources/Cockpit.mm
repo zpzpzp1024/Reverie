@@ -93,6 +93,63 @@ static CGFloat PrefFloat(NSString *key, CGFloat fallback)
     return [value isKindOfClass:[NSNumber class]] ? [value doubleValue] : fallback;
 }
 
+// Marker files are easier to create from Filza than editing a plist.
+#define COCKPIT_TEST "/var/mobile/Library/Preferences/lilliana.cockpit.test"
+#define COCKPIT_HOST "/var/mobile/Library/Preferences/lilliana.cockpit.host"
+
+static BOOL FileExists(NSString *path)
+{
+    return [[NSFileManager defaultManager] fileExistsAtPath:path];
+}
+
+static BOOL TestModeEnabled(void)
+{
+    if (PrefBool(kPrefsTestMain, NO)) {
+        return YES;
+    }
+    return FileExists(@COCKPIT_TEST);
+}
+
+static NSString *HostBundleID(void)
+{
+    NSString *bundleID = PrefString(kPrefsHostApp);
+    if (bundleID.length) {
+        return bundleID;
+    }
+    
+    NSString *text = [NSString stringWithContentsOfFile:@COCKPIT_HOST encoding:NSUTF8StringEncoding error:nil];
+    text = [text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    return text.length ? text : nil;
+}
+
+static void LogPrefsState(void)
+{
+    NSFileManager *manager = [NSFileManager defaultManager];
+    NSString *path = @COCKPIT_PREFS;
+    NSDictionary *attributes = [manager attributesOfItemAtPath:path error:nil];
+    NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:path];
+    
+    CLog(@"prefs: path=%@ exists=%d size=%llu parsed=%d keys=%lu",
+         path,
+         [manager fileExistsAtPath:path],
+         [attributes fileSize],
+         prefs != nil,
+         (unsigned long)prefs.count);
+    
+    if (prefs) {
+        CLog(@"prefs: %@", prefs);
+    } else if ([manager fileExistsAtPath:path]) {
+        CLog(@"prefs: file exists but is not a readable dictionary");
+    }
+    
+    CLog(@"prefs: testMarker=%d hostFile=%d enabled=%d testMode=%d host=%@",
+         FileExists(@COCKPIT_TEST),
+         FileExists(@COCKPIT_HOST),
+         PrefBool(kPrefsEnabled, YES),
+         TestModeEnabled(),
+         HostBundleID() ?: @"(none)");
+}
+
 #pragma mark - Runtime helpers
 
 static id Call0(id object, NSString *selector)
@@ -515,7 +572,7 @@ static void CreateInterface(BOOL testMode)
          NSStringFromCGRect(window.bounds),
          NSStringFromCGRect(left.frame));
     
-    NSString *bundleID = PrefString(kPrefsHostApp);
+    NSString *bundleID = HostBundleID();
     if (bundleID.length) {
         CLog(@"ui: hosting %@ in %@ mode", bundleID, testMode ? @"test" : @"car");
         gHostController = HostApplication(bundleID, left);
@@ -535,7 +592,7 @@ static void Tick(void)
 {
     @try {
         BOOL carConnected = (CarDisplay() != nil);
-        BOOL testMode = (!carConnected && PrefBool(kPrefsTestMain, NO));
+        BOOL testMode = (!carConnected && TestModeEnabled());
         
         if (!carConnected && !testMode) {
             if (gWindow && !gWindow.hidden) {
@@ -588,9 +645,10 @@ static void CockpitInit(void)
             return;
         }
         
-        CLog(@"--- Cockpit 0.0.2 loaded ---");
+        CLog(@"--- Cockpit 0.0.3 loaded ---");
         
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+            LogPrefsState();
             DumpProbe();
             Tick();
             

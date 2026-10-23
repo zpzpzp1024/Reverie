@@ -58,19 +58,22 @@ done | grep -i didi
 
 ## 没有车机怎么测（手机屏测试模式）
 
-车不在旁边时，CarPlay 相关的部分测不了（没有会话就找不到车机屏），但**宿主 App 那段最容易出错的代码可以测**。
+有两种开启方式，任选其一：
 
-在配置里加一行：
+1. 建一个空文件（推荐，Filza 里「新建文件」即可）：
 
-```xml
-<key>TestOnMainScreen</key>
-<true/>
 ```
+/var/mobile/Library/Preferences/lilliana.cockpit.test
+```
+
+2. 或者在 plist 里写 `<key>TestOnMainScreen</key><true/>`
+
+车不在旁边时，CarPlay 相关的部分测不了（没有会话就找不到车机屏），但**宿主 App 那段最容易出错的代码可以测**。
 
 重启 SpringBoard 后，不需要 CarPlay，手机上会直接在**屏幕左半边**出现蓝色探针区域：
 
 - 屏幕左半边被一块半透明蓝色盖住 → 窗口创建、布局、渲染链路通了
-- 再填 `HostBundleID`，那个 App 会被缩放进左半边 → scene 宿主链路通了，触摸也能操作它
+- 再填宿主包名，那个 App 会被缩放进左半边 → scene 宿主链路通了，触摸也能操作它
 - 右上角的 `✕` 用来关掉浮层（控件会挡住 SpringBoard，关掉后要重启 SpringBoard 才会再出现）
 - 右半边的触摸会正常传给下面的 SpringBoard（测试窗口只占左半边）
 
@@ -88,7 +91,7 @@ touch /var/mobile/Library/Preferences/lilliana.cockpit.off
 
 `/var/mobile/Library/Logs/Cockpit.log`（256 KB 轮转），记录：
 
-- `--- Cockpit 0.0.2 loaded ---`：tweak 被加载
+- `--- Cockpit 0.0.3 loaded ---`：tweak 被加载
 - `probe: screens`：车机屏是否被识别，`car=1` / `carplay=1`
 - `make window: ...`：窗口是否创建成功，frame 是多少
 - `ui: no HostBundleID set, probe only`：没有配置宿主的 App
