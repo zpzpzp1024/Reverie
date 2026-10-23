@@ -81,6 +81,40 @@ static void CLog(NSString *format, ...)
     }
 }
 
+#pragma mark - Exception filter
+
+// SpringBoard's scene view controller raises an internal consistency exception
+// when a hosted scene's foreground flag changes without the controller asking
+// for it. Hosting an app in a plain window on the phone screen triggers that
+// path, and the exception aborts SpringBoard. Swallow only that one assertion
+// (and log every occurrence); everything else still aborts as usual.
+static IMP gOriginalRaiseIMP;
+
+static void CockpitRaise(id self, SEL _cmd)
+{
+    NSString *reason = nil;
+    @try {
+        reason = [self reason];
+    } @catch (__unused NSException *ignored) {
+    }
+    
+    if ([reason containsString:@"foreground status out from underneath us"]) {
+        CLog(@"*** cockpit: swallowed scene foreground assertion");
+        return;
+    }
+    
+    ((void (*)(id, SEL))gOriginalRaiseIMP)(self, _cmd);
+}
+
+static void InstallExceptionFilter(void)
+{
+    Method method = class_getInstanceMethod([NSException class], @selector(raise));
+    if (method) {
+        gOriginalRaiseIMP = method_setImplementation(method, (IMP)CockpitRaise);
+    }
+    CLog(@"filter: NSException -raise hooked=%d", gOriginalRaiseIMP != NULL);
+}
+
 #pragma mark - Crash capture
 
 static void CockpitWriteRaw(const char *text)
@@ -1017,7 +1051,8 @@ static void CockpitInit(void)
             return;
         }
         
-        CLog(@"--- Cockpit 0.0.9 loaded ---");
+        CLog(@"--- Cockpit 0.0.10 loaded ---");
+        InstallExceptionFilter();
         InstallCrashHandlers();
         
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
