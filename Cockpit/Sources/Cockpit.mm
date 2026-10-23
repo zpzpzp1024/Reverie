@@ -37,6 +37,7 @@
 #define COCKPIT_HOSTING "/var/mobile/Library/Preferences/lilliana.cockpit.hosting"
 #define COCKPIT_CRASHED "/var/mobile/Library/Preferences/lilliana.cockpit.crashed"
 #define COCKPIT_NEWSCENE "/var/mobile/Library/Preferences/lilliana.cockpit.newscene"
+#define COCKPIT_MODE    "/var/mobile/Library/Preferences/lilliana.cockpit.mode"
 
 static NSString *const kPrefsHostApp  = @"HostBundleID";
 static NSString *const kPrefsRatio    = @"SplitRatio";
@@ -79,40 +80,6 @@ static void CLog(NSString *format, ...)
         fputs(line.UTF8String, file);
         fclose(file);
     }
-}
-
-#pragma mark - Exception filter
-
-// SpringBoard's scene view controller raises an internal consistency exception
-// when a hosted scene's foreground flag changes without the controller asking
-// for it. Hosting an app in a plain window on the phone screen triggers that
-// path, and the exception aborts SpringBoard. Swallow only that one assertion
-// (and log every occurrence); everything else still aborts as usual.
-static IMP gOriginalRaiseIMP;
-
-static void CockpitRaise(id self, SEL _cmd)
-{
-    NSString *reason = nil;
-    @try {
-        reason = [self reason];
-    } @catch (__unused NSException *ignored) {
-    }
-    
-    if ([reason containsString:@"foreground status out from underneath us"]) {
-        CLog(@"*** cockpit: swallowed scene foreground assertion");
-        return;
-    }
-    
-    ((void (*)(id, SEL))gOriginalRaiseIMP)(self, _cmd);
-}
-
-static void InstallExceptionFilter(void)
-{
-    Method method = class_getInstanceMethod([NSException class], @selector(raise));
-    if (method) {
-        gOriginalRaiseIMP = method_setImplementation(method, (IMP)CockpitRaise);
-    }
-    CLog(@"filter: NSException -raise hooked=%d", gOriginalRaiseIMP != NULL);
 }
 
 #pragma mark - Crash capture
@@ -528,36 +495,97 @@ static BOOL SetObjectIvar(id object, NSString *name, id value)
     return YES;
 }
 
+// -1 = auto (apply after the app process is up), -2 = never, >= 0 = immediately
+static NSInteger ConfiguredMode(void)
+{
+    NSString *path = @COCKPIT_MODE;
+    if (![[NSFileManager defaultManager] fileExistsAtPath:path]) {
+        return -1;
+    }
+    NSString *text = [[NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil]
+                      stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (text.length == 0) {
+        return -1;
+    }
+    NSString *lower = text.lowercaseString;
+    if ([lower isEqualToString:@"auto"]) {
+        return -1;
+    }
+    if ([lower isEqualToString:@"none"] || [lower isEqualToString:@"off"]) {
+        return -2;
+    }
+    return text.integerValue;
+}
+
+static BOOL SetCurrentMode(id viewController, NSInteger mode)
+{
+    if (!viewController) {
+        return NO;
+    }
+    if ([viewController respondsToSelector:NSSelectorFromString(@"_setCurrentMode:")]) {
+        CallInteger(viewController, @"_setCurrentMode:", mode);
+        return YES;
+    }
+    @try {
+        [viewController setValue:@(mode) forKey:@"currentMode"];
+        return YES;
+    } @catch (NSException *exception) {
+        CLog(@"mode: KVC failed: %@", exception.reason);
+    }
+    return SetObjectIvar(viewController, @"_currentMode", @(mode));
+}
+
+// Live mode is what drives the hosted scene's foreground state. Switching into
+// it before the scene update transaction has brought the app up makes
+// SpringBoard's scene controller believe the foreground flag changed behind its
+// back, and it raises NSInternalInconsistencyException. So in auto mode we wait
+// for the process to exist and only then go live.
+static void ApplyModeWhenReady(id viewController, id application, NSInteger mode, int attempt)
+{
+    if (mode != -1 || !viewController) {
+        return;
+    }
+    
+    BOOL running = BoolReturn(application, @"isRunning", NO);
+    CLog(@"mode: auto attempt=%d running=%d", attempt, running);
+    
+    if (running) {
+        BOOL ok = SetCurrentMode(viewController, 2);
+        CLog(@"mode: live applied=%d", ok);
+        return;
+    }
+    
+    if (attempt < 8) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+            ApplyModeWhenReady(viewController, application, mode, attempt + 1);
+        });
+    } else {
+        CLog(@"mode: app never started, staying passive");
+    }
+}
+
 // Mirrors the sequence in carplay-cast: the transaction must be tracked in
 // _activeTransitions and begun before _createSceneViewController, and the
 // scene view wants displayMode 4 afterwards. Skipping these leaves the view
 // controller in a half-committed state that SpringBoard eventually trips over.
-static void ConfigureAppViewController(id viewController, id entity)
+static void ConfigureAppViewController(id viewController, id entity, id application)
 {
     SEL ignoresSel = NSSelectorFromString(@"setIgnoresOcclusions:");
     if ([viewController respondsToSelector:ignoresSel]) {
         ((void (*)(id, SEL, BOOL))objc_msgSend)(viewController, ignoresSel, NO);
     }
     
-    BOOL modeSet = NO;
-    if ([viewController respondsToSelector:NSSelectorFromString(@"_setCurrentMode:")]) {
-        CallInteger(viewController, @"_setCurrentMode:", 2);
-        modeSet = YES;
+    NSInteger mode = ConfiguredMode();
+    CLog(@"host: mode config=%ld (auto=-1 none=-2)", (long)mode);
+    if (mode >= 0) {
+        CLog(@"host: currentMode immediate=%d", SetCurrentMode(viewController, mode));
+    } else {
+        CLog(@"host: currentMode left at default");
     }
-    if (!modeSet) {
-        @try {
-            [viewController setValue:@2 forKey:@"currentMode"];
-            modeSet = YES;
-        } @catch (NSException *exception) {
-            CLog(@"host: currentMode via KVC failed: %@", exception.reason);
-        }
-    }
-    if (!modeSet) {
-        modeSet = SetObjectIvar(viewController, @"_currentMode", @2);
-    }
-    CLog(@"host: currentMode set=%d", modeSet);
     
     id activationSettings = Call0(viewController, @"_activationSettings");
+    CLog(@"host: activationSettings=%@",
+         activationSettings ? NSStringFromClass([activationSettings class]) : @"(nil)");
     if (activationSettings) {
         Call0(activationSettings, @"clearActivationSettings");
         CLog(@"host: activation settings cleared");
@@ -734,7 +762,14 @@ static id HostApplication(NSString *bundleID, UIView *container)
         return nil;
     }
     
-    ConfigureAppViewController(viewController, entity);
+    ConfigureAppViewController(viewController, entity, application);
+    
+    NSInteger configuredMode = ConfiguredMode();
+    if (configuredMode == -1) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+            ApplyModeWhenReady(viewController, application, configuredMode, 1);
+        });
+    }
     
     UIView *appView = Call0(viewController, @"view");
     if (!appView) {
@@ -1051,8 +1086,7 @@ static void CockpitInit(void)
             return;
         }
         
-        CLog(@"--- Cockpit 0.0.10 loaded ---");
-        InstallExceptionFilter();
+        CLog(@"--- Cockpit 0.0.11 loaded ---");
         InstallCrashHandlers();
         
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{

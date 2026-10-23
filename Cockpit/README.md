@@ -163,27 +163,33 @@ touch /var/mobile/Library/Preferences/lilliana.cockpit.off
 
 日志里会打 `host: newSceneIdentityForApplication: = ...`。iOS 16.3 上对不支持多窗口的 App（包括设置）它会直接返回默认场景 `-default`，也就是**没效果**。
 
-## 场景断言过滤
+## 前台模式（调试用）
 
-SpringBoard 的场景控制器在「它认为场景应该在前台，但场景自己变成了后台」时会抛：
+SpringBoard 的场景控制器在「它认为场景应该在前台，但场景的前台状态自己变了」时会抛
+`NSInternalInconsistencyException` 并打死 SpringBoard。实测触发点就是「刚托管、App 进程还没起来就切进 Live 模式」。
 
-```
-NSInternalInconsistencyException: Something changed the scene's (...) foreground status out from underneath us (current mode: Live)
-```
-
-把 App 挂进手机屏上的普通窗口一定会踩到它，然后整个 SpringBoard 被打死。0.0.10 起用 `NSException -raise` 钩子**只吞掉这一条**，日志里会写：
+所以现在的默认行为是 **auto**：先不切模式，等 App 进程真的起来（`isRunning=1`）再切 Live。日志里会打：
 
 ```
-*** cockpit: swallowed scene foreground assertion
+mode: auto attempt=1 running=0
+mode: live applied=1
 ```
 
-其它异常照常上报。这是原型阶段的妥协，等车机屏那条路验证完再考虑从根上避免。
+想手动改成其它行为，建这个文本文件，内容写一个数字（就是要传给 `_setCurrentMode:` 的值），或者写 `none`：
+
+```
+/var/mobile/Library/Preferences/lilliana.cockpit.mode
+```
+
+- 不建文件 / 写 `auto`：等 App 起来再切 Live（推荐）
+- 写 `none`：永远不切，保持默认模式
+- 写 `2`：托管时立刻切 Live（0.0.11 及以前的行为，会崩）
 
 ## 日志
 
 `/var/mobile/Library/Logs/Cockpit.log`（256 KB 轮转），记录：
 
-- `--- Cockpit 0.0.10 loaded ---`：tweak 被加载
+- `--- Cockpit 0.0.11 loaded ---`：tweak 被加载
 - `probe: screens`：车机屏是否被识别，`car=1` / `carplay=1`
 - `make window: ...`：窗口是否创建成功，frame 是多少
 - `ui: no HostBundleID set, probe only`：没有配置宿主的 App
