@@ -52,7 +52,7 @@ type $env:USERPROFILE\.ssh\id_ed25519.pub | ssh root@<手机IP> "mkdir -p /var/r
 **日常用法：**
 
 ```powershell
-# 装最新一版（自动从 GitHub releases 下载 cockpit-* 的最新 deb）
+# 装最新一版（CI 每次构建都会更新 cockpit-latest 这个 release）
 .\Cockpit\deploy.ps1 -Device 192.168.1.23 -Latest
 
 # 装本地某个包
