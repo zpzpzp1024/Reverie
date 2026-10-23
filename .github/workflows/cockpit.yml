@@ -1,0 +1,66 @@
+name: cockpit
+
+on:
+  push:
+    branches: [emt]
+    paths:
+      - 'Cockpit/**'
+      - '.github/workflows/cockpit.yml'
+  pull_request:
+    paths:
+      - 'Cockpit/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: macos-14
+    env:
+      THEOS: ${{ github.workspace }}/theos
+      THEOS_SDK: iPhoneOS16.5.sdk
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Cache Theos
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.THEOS }}
+          key: theos-macos-${{ env.THEOS_SDK }}-v1
+
+      - name: Install Theos
+        run: |
+          set -euo pipefail
+
+          if [ ! -d "$THEOS/.git" ]; then
+            git clone --recursive --depth 1 --shallow-submodules https://github.com/theos/theos.git "$THEOS"
+          fi
+
+          if [ ! -d "$THEOS/sdks/$THEOS_SDK" ]; then
+            SDK_TMP="$RUNNER_TEMP/theos-sdks"
+            rm -rf "$SDK_TMP"
+            git clone --depth 1 --filter=blob:none --sparse https://github.com/theos/sdks.git "$SDK_TMP"
+            git -C "$SDK_TMP" sparse-checkout set "$THEOS_SDK"
+            cp -R "$SDK_TMP/$THEOS_SDK" "$THEOS/sdks/"
+          fi
+
+          echo "$THEOS/bin" >> "$GITHUB_PATH"
+
+      - name: Install ldid
+        run: brew install ldid
+
+      - name: Build package
+        run: make -C Cockpit package FINALPACKAGE=1
+
+      - name: Show package
+        run: ls -la Cockpit/packages/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cockpit-deb
+          path: Cockpit/packages/*.deb
+          if-no-files-found: error
