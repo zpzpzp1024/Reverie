@@ -24,9 +24,10 @@
 #define COCKPIT_OFF   "/var/mobile/Library/Preferences/lilliana.cockpit.off"
 #define COCKPIT_PREFS "/var/mobile/Library/Preferences/lilliana.cockpit.plist"
 
-static NSString *const kPrefsHostApp = @"HostBundleID";
-static NSString *const kPrefsRatio   = @"SplitRatio";
-static NSString *const kPrefsEnabled = @"Enabled";
+static NSString *const kPrefsHostApp  = @"HostBundleID";
+static NSString *const kPrefsRatio    = @"SplitRatio";
+static NSString *const kPrefsEnabled  = @"Enabled";
+static NSString *const kPrefsTestMain = @"TestOnMainScreen";
 
 #pragma mark - Logging
 
@@ -389,7 +390,27 @@ static UIWindow *gWindow;
 static UIView *gLeftPane;
 static UIView *gDivider;
 static UILabel *gLabel;
+static UIButton *gCloseButton;
 static id gHostController;
+static BOOL gTestMode;
+static BOOL gUserClosed;
+
+@interface CockpitControl : NSObject
+- (void)closeTapped;
+@end
+
+@implementation CockpitControl
+
+- (void)closeTapped
+{
+    gUserClosed = YES;
+    gWindow.hidden = YES;
+    CLog(@"ui: overlay hidden by the user (respring to bring it back)");
+}
+
+@end
+
+static CockpitControl *gControl;
 
 static void Layout(void)
 {
@@ -398,22 +419,54 @@ static void Layout(void)
     }
     
     CGRect bounds = gWindow.bounds;
-    CGFloat ratio = PrefFloat(kPrefsRatio, 0.5);
-    ratio = MAX(0.25, MIN(0.75, ratio));
-    CGFloat split = floor(bounds.size.width * ratio);
     
-    gLeftPane.frame = CGRectMake(0, 0, split, bounds.size.height);
+    if (gTestMode) {
+        // The window is already only the left half of the phone screen.
+        gLeftPane.frame = bounds;
+        gDivider.frame = CGRectMake(bounds.size.width - 2, 0, 2, bounds.size.height);
+    } else {
+        CGFloat ratio = PrefFloat(kPrefsRatio, 0.5);
+        ratio = MAX(0.25, MIN(0.75, ratio));
+        CGFloat split = floor(bounds.size.width * ratio);
+        gLeftPane.frame = CGRectMake(0, 0, split, bounds.size.height);
+        gDivider.frame = CGRectMake(split, 0, 2, bounds.size.height);
+    }
+    
     gLabel.frame = gLeftPane.bounds;
-    gDivider.frame = CGRectMake(split, 0, 2, bounds.size.height);
+    gCloseButton.frame = CGRectMake(gLeftPane.bounds.size.width - 64, 16, 48, 48);
 }
 
-static void CreateInterface(void)
+static UIWindow *MakeTestWindow(void)
 {
-    UIWindow *window = MakeCarWindow();
+    CGRect screen = [UIScreen mainScreen].bounds;
+    CGFloat ratio = PrefFloat(kPrefsRatio, 0.5);
+    ratio = MAX(0.25, MIN(0.75, ratio));
+    CGRect frame = CGRectMake(0, 0, floor(screen.size.width * ratio), screen.size.height);
+    
+    UIWindow *window = nil;
+    for (UIScene *scene in [[UIApplication sharedApplication] connectedScenes]) {
+        if ([scene isKindOfClass:[UIWindowScene class]] && scene.activationState == UISceneActivationStateForegroundActive) {
+            window = [[UIWindow alloc] initWithWindowScene:(UIWindowScene *)scene];
+            break;
+        }
+    }
+    if (!window) {
+        window = [[UIWindow alloc] initWithFrame:frame];
+    }
+    window.frame = frame;
+    
+    CLog(@"test window: class=%@ frame=%@ screen=%@", NSStringFromClass([window class]), NSStringFromCGRect(frame), NSStringFromCGRect(screen));
+    return window;
+}
+
+static void CreateInterface(BOOL testMode)
+{
+    UIWindow *window = testMode ? MakeTestWindow() : MakeCarWindow();
     if (!window) {
         return;
     }
     
+    gTestMode = testMode;
     window.windowLevel = 9000000;
     window.backgroundColor = [UIColor clearColor];
     window.hidden = NO;
@@ -424,7 +477,7 @@ static void CreateInterface(void)
     [window addSubview:left];
     
     UILabel *label = [[UILabel alloc] initWithFrame:CGRectZero];
-    label.text = @"Cockpit 探针\n左半屏";
+    label.text = testMode ? @"Cockpit 探针\n手机屏测试" : @"Cockpit 探针\n左半屏";
     label.numberOfLines = 0;
     label.textAlignment = NSTextAlignmentCenter;
     label.textColor = [UIColor whiteColor];
@@ -436,21 +489,35 @@ static void CreateInterface(void)
     divider.backgroundColor = [UIColor whiteColor];
     [window addSubview:divider];
     
+    UIButton *close = [UIButton buttonWithType:UIButtonTypeSystem];
+    [close setTitle:@"✕" forState:UIControlStateNormal];
+    [close setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    close.titleLabel.font = [UIFont systemFontOfSize:28 weight:UIFontWeightBold];
+    close.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.35];
+    close.layer.cornerRadius = 24;
+    close.hidden = !testMode;
+    if (!gControl) {
+        gControl = [CockpitControl new];
+    }
+    [close addTarget:gControl action:@selector(closeTapped) forControlEvents:UIControlEventTouchUpInside];
+    [left addSubview:close];
+    
     gWindow = window;
     gLeftPane = left;
     gDivider = divider;
     gLabel = label;
+    gCloseButton = close;
     
     Layout();
     
-    CLog(@"ui: window=%@ bounds=%@ pane=%d",
+    CLog(@"ui: window=%@ bounds=%@ pane=%@",
          NSStringFromClass([window class]),
          NSStringFromCGRect(window.bounds),
-         BoolReturn(window, @"isHidden", YES) ? 0 : 1);
+         NSStringFromCGRect(left.frame));
     
     NSString *bundleID = PrefString(kPrefsHostApp);
     if (bundleID.length) {
-        CLog(@"ui: hosting %@", bundleID);
+        CLog(@"ui: hosting %@ in %@ mode", bundleID, testMode ? @"test" : @"car");
         gHostController = HostApplication(bundleID, left);
     } else {
         CLog(@"ui: no HostBundleID set, probe only");
@@ -468,20 +535,38 @@ static void Tick(void)
 {
     @try {
         BOOL carConnected = (CarDisplay() != nil);
+        BOOL testMode = (!carConnected && PrefBool(kPrefsTestMain, NO));
         
-        if (!carConnected) {
+        if (!carConnected && !testMode) {
             if (gWindow && !gWindow.hidden) {
                 gWindow.hidden = YES;
-                CLog(@"lifecycle: CarPlay gone, window hidden");
+                CLog(@"lifecycle: car display gone, window hidden");
             }
             return;
         }
         
         if (gWindow) {
-            if (gWindow.hidden) {
-                gWindow.hidden = NO;
-                CLog(@"lifecycle: CarPlay back, window shown");
+            if (carConnected && gTestMode) {
+                // CarPlay came up while we were testing on the phone screen.
+                gWindow.hidden = YES;
+                gWindow = nil;
+                gLeftPane = nil;
+                gDivider = nil;
+                gLabel = nil;
+                gCloseButton = nil;
+                gHostController = nil;
+                gTestMode = NO;
+                gUserClosed = NO;
+                CLog(@"lifecycle: car display found, rebuilding there");
+            } else {
+                if (gWindow.hidden && !gUserClosed) {
+                    gWindow.hidden = NO;
+                }
+                return;
             }
+        }
+        
+        if (gUserClosed) {
             return;
         }
         
@@ -489,7 +574,7 @@ static void Tick(void)
             return;
         }
         
-        CreateInterface();
+        CreateInterface(testMode);
     } @catch (NSException *exception) {
         CLog(@"tick: exception %@: %@", exception.name, exception.reason);
     }
@@ -503,7 +588,7 @@ static void CockpitInit(void)
             return;
         }
         
-        CLog(@"--- Cockpit 0.0.1 loaded ---");
+        CLog(@"--- Cockpit 0.0.2 loaded ---");
         
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
             DumpProbe();
