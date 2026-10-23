@@ -486,6 +486,9 @@ static void DumpProbe(void)
 
 #pragma mark - Hosting
 
+// Forward-declared so ApplyModeWhenReady can check it.
+static BOOL gUserClosed = NO;
+
 static BOOL SetObjectIvar(id object, NSString *name, id value)
 {
     Ivar ivar = object ? class_getInstanceVariable([object class], name.UTF8String) : NULL;
@@ -525,12 +528,12 @@ static BOOL SetCurrentMode(id viewController, NSInteger mode)
 // SpringBoard's scene controller believe the foreground flag changed behind its
 // back, and it raises NSInternalInconsistencyException. So in auto mode we wait
 // for the process to exist and only then go live.
-// With the transaction + mode 2 applied up front, the app process should
-// come up on its own. This poller just re-applies mode 2 as a belt-and-
-// suspenders measure and logs the transition.
+// We also stop polling once the user closes the overlay, because the hosted
+// scene goes background at that point and re-applying Live mode causes the
+// same assertion.
 static void ApplyModeWhenReady(id viewController, id application, NSInteger mode, int attempt)
 {
-    if (!viewController) {
+    if (!viewController || gUserClosed) {
         return;
     }
     
@@ -538,8 +541,12 @@ static void ApplyModeWhenReady(id viewController, id application, NSInteger mode
     CLog(@"mode: poll attempt=%d running=%d", attempt, running);
     
     if (running) {
-        BOOL ok = SetCurrentMode(viewController, 2);
-        CLog(@"mode: live applied=%d", ok);
+        @try {
+            BOOL ok = SetCurrentMode(viewController, 2);
+            CLog(@"mode: live applied=%d", ok);
+        } @catch (NSException *e) {
+            CLog(@"mode: live threw %@: %@", e.name, e.reason);
+        }
         return;
     }
     
@@ -567,10 +574,11 @@ static void ConfigureAppViewController(id viewController, id entity, id applicat
         ((void (*)(id, SEL, BOOL))objc_msgSend)(viewController, ignoresSel, YES);
     }
     
-    // Apply mode 2 (foreground/active) immediately. The scene transaction
-    // below carries this intent to the app process.
-    SetCurrentMode(viewController, 2);
-    CLog(@"host: currentMode set to 2 (foreground)");
+    // Do NOT set mode 2 here. Setting Live mode before the app process is up
+    // triggers NSInternalInconsistencyException: "Something changed the scene's
+    // foreground status out from underneath us". Instead we leave mode at
+    // default and let ApplyModeWhenReady switch to Live after isRunning=1.
+    CLog(@"host: currentMode left at default (will go live after app starts)");
     
     id activationSettings = Call0(viewController, @"_activationSettings");
     CLog(@"host: activationSettings=%@",
@@ -647,58 +655,15 @@ static void LogHostedState(id application, id handle, UIView *appView, UIView *s
 }
 
 // In SpringBoard's process the external launch helpers (SBSLaunch*, 
-// LSApplicationWorkspace) don't work — they're for other processes talking
-// *to* SpringBoard. Instead we ask SBApplicationController to activate the
-// app directly, and fall back to the scene transaction itself pulling the
-// process up.
+// LSApplicationWorkspace) don't work. SBApplicationController on iOS 16
+// has no activate/launch selectors either. The scene update transaction
+// with deliveringActions:YES in ConfigureAppViewController is the only
+// mechanism that actually pulls the app process up.
 static BOOL LaunchApplication(id application)
 {
-    if (!application) {
-        return NO;
-    }
-    
-    // SBApplicationController has activateApplicationFromNib: and similar
-    // activation selectors that work from inside SpringBoard.
-    Class appControllerClass = NSClassFromString(@"SBApplicationController");
-    id appController = CallClass0(appControllerClass, @"sharedInstance");
-    if (!appController) {
-        CLog(@"launch: no SBApplicationController");
-        return NO;
-    }
-    
-    // Try the most common activation selectors.
-    SEL activateSels[] = {
-        NSSelectorFromString(@"activateApplicationFromNib:"),
-        NSSelectorFromString(@"activateApplication:"),
-        NSSelectorFromString(@"launchApplication:"),
-        NSSelectorFromString(@"presentApplication:"),
-    };
-    for (int i = 0; i < 4; i++) {
-        if ([appController respondsToSelector:activateSels[i]]) {
-            @try {
-                ((void (*)(id, SEL, id))objc_msgSend)(appController, activateSels[i], application);
-                CLog(@"launch: %@ succeeded", NSStringFromSelector(activateSels[i]));
-                return YES;
-            } @catch (NSException *e) {
-                CLog(@"launch: %@ threw %@", NSStringFromSelector(activateSels[i]), e.reason);
-            }
-        }
-    }
-    
-    // Dump all selectors containing "activate" or "launch" for diagnostics.
-    unsigned int count = 0;
-    Method *methods = class_copyMethodList([appControllerClass class], &count);
-    NSMutableArray<NSString *> *matches = [NSMutableArray array];
-    for (unsigned int i = 0; i < count; i++) {
-        NSString *name = NSStringFromSelector(method_getName(methods[i]));
-        if ([name.lowercaseString containsString:@"activate"] || [name.lowercaseString containsString:@"launch"]) {
-            [matches addObject:name];
-        }
-    }
-    free(methods);
-    CLog(@"launch: SBApplicationController activate/launch selectors: %@",
-         [matches componentsJoinedByString:@" | "]);
-    
+    // No-op: the transaction in ConfigureAppViewController handles this.
+    // This function is kept for logging/diagnostics only.
+    CLog(@"launch: relying on scene transaction to start app");
     return NO;
 }
 
@@ -902,7 +867,6 @@ static UILabel *gLabel;
 static UIButton *gCloseButton;
 static id gHostController;
 static BOOL gTestMode;
-static BOOL gUserClosed;
 
 @interface CockpitControl : NSObject
 - (void)closeTapped;
@@ -1140,7 +1104,7 @@ static void CockpitInit(void)
             return;
         }
         
-        CLog(@"--- Cockpit 0.0.13 loaded ---");
+        CLog(@"--- Cockpit 0.0.14 loaded ---");
         InstallCrashHandlers();
         
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
