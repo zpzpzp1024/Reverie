@@ -9,9 +9,9 @@ SileoDepiction: https://paisseon.github.io/depictions/Reverie.json
 Depiction: https://pinpal.github.io/Sileo-Depiction-WebViews/?json=https://paisseon.github.io/depictions/Reverie.json&name=Reverie&dev=Paisseon
 Icon: https://paisseon.github.io/icons/Reverie.png
 Architecture: iphoneos-arm64
-Version: 0.1.2
+Version: 0.1.3
 Installed-Size: 852
-Filename: ./lilliana.reverie_0.1.2_iphoneos-arm64.deb
-Size: 100932
-SHA256: face9969d2d621577a0909691cc10bd415f424745dce88c7c860b9d756e172d9
-MD5sum: 6de3f2f3be89a72c9676f7b443c4ab07
+Filename: ./lilliana.reverie_0.1.3_iphoneos-arm64.deb
+Size: 100894
+SHA256: 953fee9539514172d98c37bdc0275fd396ed36ff364e4ade88ebfe0c65a19672
+MD5sum: 7d63f6c11f48e8edb4bc28d9430c5598
