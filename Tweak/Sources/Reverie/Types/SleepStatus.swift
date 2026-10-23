@@ -1,7 +1,7 @@
 enum SleepStatus {
-    case autoSlept // Sleep percent reached
-    case autoWoken // Wake percent reached
+    case autoSlept // Unplugged, locked, idle
+    case autoWoken // Charger attached
     case dreamless // In a state unrelated to Reverie
     case userSlept // CC module or prefs button pressed
-    case userWoken // Upvolume pressed thrice
+    case userWoken // Volume down pressed five times
 }

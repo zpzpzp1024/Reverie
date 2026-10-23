@@ -39,7 +39,10 @@ final class RootListController: PSListController {
             }
             
             SpecifierFactory.add([
-                GroupCell(name: "操作", footerText: ""),
+                GroupCell(
+                    name: "操作",
+                    footerText: "休眠后连按音量减 5 次可强制唤醒，屏幕会亮起并解锁。"
+                ),
                 ButtonCell(name: "立即休眠", action: #selector(Self.sleepDart))
             ], to: &specifiers, in: self)
             
