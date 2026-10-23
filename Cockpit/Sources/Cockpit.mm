@@ -574,11 +574,14 @@ static void ConfigureAppViewController(id viewController, id entity, id applicat
         ((void (*)(id, SEL, BOOL))objc_msgSend)(viewController, ignoresSel, YES);
     }
     
-    // Do NOT set mode 2 here. Setting Live mode before the app process is up
-    // triggers NSInternalInconsistencyException: "Something changed the scene's
-    // foreground status out from underneath us". Instead we leave mode at
-    // default and let ApplyModeWhenReady switch to Live after isRunning=1.
-    CLog(@"host: currentMode left at default (will go live after app starts)");
+    // Set mode 2 (foreground/active) immediately. This is what actually tells
+    // SpringBoard to launch the app process — without it the scene handle is
+    // created but the app never starts (isRunning stays NO forever).
+    // The crash this previously caused (NSInternalInconsistencyException when
+    // the user closes the overlay) is now handled by switching mode back to 0
+    // in closeTapped before hiding the window.
+    SetCurrentMode(viewController, 2);
+    CLog(@"host: currentMode set to 2 (foreground)");
     
     id activationSettings = Call0(viewController, @"_activationSettings");
     CLog(@"host: activationSettings=%@",
@@ -877,6 +880,20 @@ static BOOL gTestMode;
 - (void)closeTapped
 {
     gUserClosed = YES;
+    
+    // Before hiding the overlay, switch the hosted scene back to background
+    // mode. If we leave it in Live (foreground) and just hide the window,
+    // SpringBoard detects that the scene's foreground status changed
+    // behind its back and crashes with NSInternalInconsistencyException.
+    if (gHostController) {
+        @try {
+            CallInteger(gHostController, @"_setCurrentMode:", 0);
+            CLog(@"ui: mode set to 0 (background) before hiding");
+        } @catch (NSException *e) {
+            CLog(@"ui: mode reset threw %@: %@", e.name, e.reason);
+        }
+    }
+    
     gWindow.hidden = YES;
     // The close button lives in its own window so a hosted app cannot cover it.
     gCloseWindow.hidden = YES;
@@ -1104,7 +1121,7 @@ static void CockpitInit(void)
             return;
         }
         
-        CLog(@"--- Cockpit 0.0.14 loaded ---");
+        CLog(@"--- Cockpit 0.0.15 loaded ---");
         InstallCrashHandlers();
         
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
