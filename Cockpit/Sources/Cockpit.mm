@@ -121,15 +121,6 @@ static id Call2(id object, NSString *selector, id a, id b)
     return ((id (*)(id, SEL, id, id))objc_msgSend)(object, sel, a, b);
 }
 
-static id Call3(id object, NSString *selector, id a, id b, id c)
-{
-    SEL sel = NSSelectorFromString(selector);
-    if (!object || ![object respondsToSelector:sel]) {
-        return nil;
-    }
-    return ((id (*)(id, SEL, id, id, id))objc_msgSend)(object, sel, a, b, c);
-}
-
 static id CallClass0(Class cls, NSString *selector)
 {
     SEL sel = NSSelectorFromString(selector);
@@ -182,16 +173,6 @@ static id CarDisplay(void)
         }
     }
     
-    return nil;
-}
-
-static UIScreen *CarScreen(void)
-{
-    for (UIScreen *screen in [UIScreen screens]) {
-        if (BoolReturn(screen, @"_isCarScreen", NO) || BoolReturn(screen, @"_isCarPlayScreen", NO)) {
-            return screen;
-        }
-    }
     return nil;
 }
 
