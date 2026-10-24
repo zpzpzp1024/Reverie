@@ -584,7 +584,7 @@ static void ScaleAppViewIntoContainer(UIView *appView, UIView *container)
         // Walk up to find the view controller, then access _deviceAppViewController
         id responder = appView.nextResponder;
         while (responder && ![responder isKindOfClass:[UIViewController class]]) {
-            responder = [responder performSelector:NSSelectorFromString(@"nextResponder")];
+            responder = Call0(responder, @"nextResponder");
         }
         if (responder) {
             @try { deviceController = [responder valueForKey:@"_deviceAppViewController"]; } @catch (...) {}
