@@ -128,6 +128,9 @@ static void CockpitSignalHandler(int signo)
     raise(signo);
 }
 
+// Forward declaration for crash loop protection.
+static int gCrashCount = 0;
+
 static void CockpitExceptionHandler(NSException *exception)
 {
     CLog(@"*** cockpit: uncaught %@: %@", exception.name, exception.reason);
@@ -141,6 +144,7 @@ static void CockpitExceptionHandler(NSException *exception)
     NSString *countStr = [NSString stringWithFormat:@"%d", gCrashCount];
     [countStr writeToFile:@COCKPIT_CRASHCOUNT atomically:YES encoding:NSUTF8StringEncoding error:nil];
     CLog(@"*** cockpit: crash count now %d", gCrashCount);
+}
 
 static void InstallCrashHandlers(void)
 {
@@ -477,7 +481,7 @@ static void DumpProbe(void)
 static HostSlot *gSlots[2];
 static BOOL gUserClosed = NO;
 static BOOL gHidden = NO;  // hidden via lilliana.cockpit.hide marker
-static int gCrashCount = 0;
+// gCrashCount declared earlier, before CockpitExceptionHandler.
 
 // SetCurrentMode and ApplyModeWhenReady removed in 0.0.21 — we no longer
 // set Mode 2 on the SBAppViewController, which was the root cause of the
