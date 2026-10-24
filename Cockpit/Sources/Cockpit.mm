@@ -42,7 +42,7 @@
 
 static NSString *const kPrefsHostApp  = @"HostBundleID";
 static NSString *const kPrefsHostApp2 = @"HostBundleID2";
-static NSString *const kPrefsRatio    = @"SplitRatio";
+// static NSString *const kPrefsRatio = @"SplitRatio"; — unused in 0.0.20 (hardcoded kSplitRatio)
 static NSString *const kPrefsEnabled  = @"Enabled";
 static NSString *const kPrefsTestMain = @"TestOnMainScreen";
 
@@ -166,11 +166,7 @@ static NSString *PrefString(NSString *key)
     return [value isKindOfClass:[NSString class]] ? value : nil;
 }
 
-static CGFloat PrefFloat(NSString *key, CGFloat fallback)
-{
-    id value = Pref(key);
-    return [value isKindOfClass:[NSNumber class]] ? [value doubleValue] : fallback;
-}
+// static CGFloat PrefFloat(NSString *key, CGFloat fallback) — unused in 0.0.20 (hardcoded ratio)
 
 // Marker files are easier to create from Filza than editing a plist.
 #define COCKPIT_TEST "/var/mobile/Library/Preferences/lilliana.cockpit.test"
