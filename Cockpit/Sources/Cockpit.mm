@@ -1038,7 +1038,7 @@ static void CockpitInit(void)
         
         // Read crash count from last session.
         NSString *crashCountText = [NSString stringWithContentsOfFile:@COCKPIT_CRASHCOUNT encoding:NSUTF8StringEncoding error:nil];
-        gCrashCount = [crashCountText.intValue] ?: 0;
+        gCrashCount = crashCountText ? [crashCountText intValue] : 0;
         if (gCrashCount > 0) {
             CLog(@"init: crash count from last session = %d", gCrashCount);
             if (gCrashCount >= 3) {
