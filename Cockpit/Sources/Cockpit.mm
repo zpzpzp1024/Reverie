@@ -555,7 +555,17 @@ static void ApplyModeWhenReady(id viewController, id application, NSInteger mode
             ApplyModeWhenReady(viewController, application, mode, attempt + 1);
         });
     } else {
-        CLog(@"mode: app never started after 30s, staying passive");
+        // App never started after 30s. Switch back to background mode to
+        // avoid leaving the scene in Live while the process is gone —
+        // that causes NSInternalInconsistencyException when the system
+        // or another tweak (e.g. CarBridge) touches the foreground flag.
+        CLog(@"mode: app never started after 30s, reverting to background");
+        @try {
+            SetCurrentMode(viewController, 0);
+            CLog(@"mode: reverted to 0 (background) to avoid stale Live");
+        } @catch (NSException *e) {
+            CLog(@"mode: revert threw %@: %@", e.name, e.reason);
+        }
     }
 }
 
@@ -917,19 +927,24 @@ static void Layout(void)
         gLeftPane.frame = bounds;
         gDivider.frame = CGRectMake(bounds.size.width - 2, 0, 2, bounds.size.height);
     } else {
+        // CarPlay screen. Leave a left margin for the CarPlay sidebar
+        // (approx 1/13 of screen width) then split the remaining area.
+        CGFloat sideMargin = floor(bounds.size.width / 13.0);
+        CGFloat usable = bounds.size.width - sideMargin;
         CGFloat ratio = PrefFloat(kPrefsRatio, 0.5);
         ratio = MAX(0.25, MIN(0.75, ratio));
-        CGFloat split = floor(bounds.size.width * ratio);
-        gLeftPane.frame = CGRectMake(0, 0, split, bounds.size.height);
-        gDivider.frame = CGRectMake(split, 0, 2, bounds.size.height);
+        CGFloat split = floor(usable * ratio);
+        gLeftPane.frame = CGRectMake(sideMargin, 0, split, bounds.size.height);
+        gDivider.frame = CGRectMake(sideMargin + split, 0, 2, bounds.size.height);
     }
     
     gLabel.frame = gLeftPane.bounds;
     
     if (gCloseWindow) {
         CGFloat paneWidth = gLeftPane.bounds.size.width;
+        CGFloat paneX = gLeftPane.frame.origin.x;
         gCloseButton.frame = CGRectMake(0, 0, 48, 48);
-        gCloseWindow.frame = CGRectMake(paneWidth - 60, 12, 48, 48);
+        gCloseWindow.frame = CGRectMake(paneX + paneWidth - 60, 12, 48, 48);
         gCloseWindow.hidden = gUserClosed;
     }
 }
@@ -957,6 +972,28 @@ static UIWindow *MakeTestWindow(void)
     return window;
 }
 
+static void TeardownHost(void)
+{
+    // Properly invalidate the AppViewController before its window goes away.
+    // Without _invalidate, SpringBoard raises:
+    //   'AppViewController must be explicitly invalidated before it can deallocate'
+    if (gHostController) {
+        @try {
+            CallInteger(gHostController, @"_setCurrentMode:", 0);
+            CLog(@"teardown: mode set to 0");
+        } @catch (NSException *e) {
+            CLog(@"teardown: mode reset threw %@: %@", e.name, e.reason);
+        }
+        SEL invalSel = NSSelectorFromString(@"_invalidate");
+        if ([gHostController respondsToSelector:invalSel]) {
+            ((void (*)(id, SEL))objc_msgSend)(gHostController, invalSel);
+            CLog(@"teardown: AppViewController invalidated");
+        }
+        gHostController = nil;
+    }
+    gUserClosed = NO;
+}
+
 static void CreateInterface(BOOL testMode)
 {
     UIWindow *window = testMode ? MakeTestWindow() : MakeCarWindow();
@@ -976,7 +1013,7 @@ static void CreateInterface(BOOL testMode)
     [window addSubview:left];
     
     UILabel *label = [[UILabel alloc] initWithFrame:CGRectZero];
-    label.text = testMode ? @"Cockpit 探针\n手机屏测试" : @"Cockpit 探针\n左半屏";
+    label.text = testMode ? @"Cockpit 探针\n手机屏测试" : @"Cockpit 探针\n车机分屏";
     label.numberOfLines = 0;
     label.textAlignment = NSTextAlignmentCenter;
     label.textColor = [UIColor whiteColor];
@@ -1070,6 +1107,9 @@ static void Tick(void)
         
         if (!carConnected && !testMode) {
             if (gWindow && !gWindow.hidden) {
+                // CarPlay disconnected. Teardown the host properly to avoid
+                // 'AppViewController must be explicitly invalidated' crash.
+                TeardownHost();
                 gWindow.hidden = YES;
                 CLog(@"lifecycle: car display gone, window hidden");
             }
@@ -1079,6 +1119,8 @@ static void Tick(void)
         if (gWindow) {
             if (carConnected && gTestMode) {
                 // CarPlay came up while we were testing on the phone screen.
+                // Teardown the old host properly before rebuilding.
+                TeardownHost();
                 gWindow.hidden = YES;
                 gWindow = nil;
                 gCloseWindow.hidden = YES;
@@ -1087,9 +1129,7 @@ static void Tick(void)
                 gDivider = nil;
                 gLabel = nil;
                 gCloseButton = nil;
-                gHostController = nil;
                 gTestMode = NO;
-                gUserClosed = NO;
                 CLog(@"lifecycle: car display found, rebuilding there");
             } else {
                 if (gWindow.hidden && !gUserClosed) {
@@ -1121,7 +1161,7 @@ static void CockpitInit(void)
             return;
         }
         
-        CLog(@"--- Cockpit 0.0.16 loaded ---");
+        CLog(@"--- Cockpit 0.0.17 loaded ---");
         InstallCrashHandlers();
         
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
