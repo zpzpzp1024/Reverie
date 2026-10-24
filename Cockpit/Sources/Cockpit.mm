@@ -1,7 +1,10 @@
 // Cockpit - CarPlay split view experiments
 //
-// Milestone 2: multi-app split screen on CarPlay display.
-// Hosts two apps side by side: left 60% + right 40%.
+// 0.0.22: restore Mode 2 hosting (only mechanism that pulls the app process
+// up), contain the foreground-consistency crash three ways (mode stand-down
+// poll, mode 0 before hide/teardown, NSException assertion filter), and fix
+// the toggle button (it lives inside the main window now — a second UIWindow
+// on the car display never received taps).
 //
 // The hosting pattern follows carplay-cast (Apache-2.0):
 //   AVExternalDevice.currentCarPlayExternalDevice
@@ -272,7 +275,7 @@ static BOOL BoolReturn(id object, NSString *selector, BOOL fallback)
     return ((BOOL (*)(id, SEL))objc_msgSend)(object, sel);
 }
 
-static void __attribute__((unused)) CallInteger(id object, NSString *selector, NSInteger value)
+static void CallInteger(id object, NSString *selector, NSInteger value)
 {
     SEL sel = NSSelectorFromString(selector);
     if (!object || ![object respondsToSelector:sel]) return;
@@ -443,6 +446,8 @@ static void DumpProbe(void)
 @property id viewController;
 @property id application;
 @property id handle;
+@property double birth;          // CFAbsoluteTime when hosted
+@property int rehostAttempts;    // bounded automatic re-host counter
 @end
 
 @implementation HostSlot
@@ -451,25 +456,161 @@ static void DumpProbe(void)
 static HostSlot *gSlots[2];
 static BOOL gUserClosed = NO;
 
-// 0.0.21: Do NOT set Mode 2. Setting Mode 2 (Live/foreground) causes
-// NSInternalInconsistencyException when another app is launched on the
-// phone — SpringBoard changes the scene's foreground status to NO, but
-// the SBAppViewController still thinks it's Live. CarBridge also
-// manipulates scene state, compounding the conflict.
-// Instead, rely on setIgnoresOcclusions:YES + the scene update
-// transaction with deliveringActions:YES to bring the app up, and let
-// SpringBoard manage the foreground/background lifecycle naturally.
-// The displayMode 4 (LiveContent) on the scene view is what makes the
-// app's content visible even without explicit Mode 2.
+static BOOL SetCurrentMode(id viewController, NSInteger mode)
+{
+    if (!viewController) return NO;
+    @try {
+        if ([viewController respondsToSelector:NSSelectorFromString(@"_setCurrentMode:")]) {
+            CallInteger(viewController, @"_setCurrentMode:", mode);
+            return YES;
+        }
+        [viewController setValue:@(mode) forKey:@"currentMode"];
+        return YES;
+    } @catch (NSException *exception) {
+        CLog(@"mode: set to %ld failed: %@", (long)mode, exception.reason);
+    }
+    return NO;
+}
 
+static void SlotSetMode(int index, NSInteger mode)
+{
+    HostSlot *slot = gSlots[index];
+    if (!slot || !slot.viewController) return;
+    @try {
+        SetCurrentMode(slot.viewController, mode);
+    } @catch (NSException *exception) {
+        CLog(@"mode[%d]: threw %@", index, exception.reason);
+    }
+}
+
+#pragma mark - Scene foreground assertion filter
+
+// Hosting an app scene from our own window makes SpringBoard raise
+// NSInternalInconsistencyException ("Something changed the scene's ...
+// foreground status out from underneath us") whenever another party
+// (CarBridge, the phone UI, or the launch path itself) flips the scene's
+// foreground flag while our SBAppViewController still holds Live mode.
+// The exception aborts SpringBoard — the 0.0.20 crash loop in Cockpit-3.log.
+// Swallow exactly that assertion while we are hosting, and resync our
+// controller's mode to 0 so it matches the scene's real state. Everything
+// else still propagates.
+static IMP gOriginalInstanceRaise;
+static IMP gOriginalClassRaise;
+
+static void CockpitResyncAfterSwallow(NSString *reason)
+{
+    for (int index = 0; index < 2; index++) {
+        HostSlot *slot = gSlots[index];
+        if (!slot || !slot.viewController) continue;
+        if (![reason containsString:slot.bundleID]) continue;
+        CLog(@"assert: resyncing mode[%d] %@ to 0", index, slot.bundleID);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            SlotSetMode(index, 0);
+        });
+        return;
+    }
+    // Reason did not name one of our scenes, but we are hosting — stand all
+    // slots down anyway so the controllers cannot be the stale side.
+    dispatch_async(dispatch_get_main_queue(), ^{
+        for (int index = 0; index < 2; index++) {
+            if (gSlots[index] && gSlots[index].viewController) SlotSetMode(index, 0);
+        }
+    });
+}
+
+static BOOL CockpitShouldSwallow(NSString *name, NSString *reason)
+{
+    if (!name || ![name isEqualToString:@"NSInternalInconsistencyException"]) return NO;
+    if (![reason containsString:@"foreground status out from underneath us"]) return NO;
+    return (gSlots[0] != nil || gSlots[1] != nil);
+}
+
+static void CockpitRaiseInstance(id self, SEL _cmd)
+{
+    BOOL swallow = NO;
+    @try {
+        swallow = CockpitShouldSwallow([self name], [self reason]);
+    } @catch (__unused NSException *ignored) { }
+    if (swallow) {
+        CLog(@"assert: swallowed scene foreground assertion (instance raise)");
+        CockpitResyncAfterSwallow([self reason] ?: @"");
+        return;
+    }
+    ((void (*)(id, SEL))gOriginalInstanceRaise)(self, _cmd);
+}
+
+static void CockpitRaiseClass(id self, SEL _cmd, NSString *name, NSString *format, va_list args)
+{
+    BOOL swallow = NO;
+    if (format) {
+        // Format a COPY of the varargs — va_list must reach the original
+        // raise untouched when we pass the exception through.
+        va_list copy;
+        va_copy(copy, args);
+        NSString *reason = nil;
+        @try { reason = [[NSString alloc] initWithFormat:format arguments:copy]; } @catch (...) {}
+        va_end(copy);
+        swallow = CockpitShouldSwallow(name, reason);
+        if (swallow) {
+            CLog(@"assert: swallowed scene foreground assertion (class raise)");
+            CockpitResyncAfterSwallow(reason ?: @"");
+            return;
+        }
+    } else {
+        swallow = CockpitShouldSwallow(name, nil);
+        if (swallow) {
+            CLog(@"assert: swallowed scene foreground assertion (class raise, no format)");
+            return;
+        }
+    }
+    ((void (*)(id, SEL, NSString *, NSString *, va_list))gOriginalClassRaise)(self, _cmd, name, format, args);
+}
+
+static void InstallExceptionFilter(void)
+{
+    Method instanceMethod = class_getInstanceMethod([NSException class], @selector(raise));
+    if (instanceMethod) {
+        gOriginalInstanceRaise = method_setImplementation(instanceMethod, (IMP)CockpitRaiseInstance);
+    }
+    Method classMethod = class_getClassMethod([NSException class], @selector(raise:format:arguments:));
+    if (classMethod) {
+        gOriginalClassRaise = method_setImplementation(classMethod, (IMP)CockpitRaiseClass);
+    }
+    CLog(@"filter: NSException raise hooks installed instance=%d class=%d",
+         gOriginalInstanceRaise != NULL, gOriginalClassRaise != NULL);
+}
+
+#pragma mark - Hosting sequence
+
+static void ApplyDisplayMode4(id viewController)
+{
+    if (!viewController) return;
+    id sceneView = Call0(viewController, @"appView");
+    if (!sceneView) return;
+    SEL displaySel = NSSelectorFromString(@"setDisplayMode:animationFactory:completion:");
+    if (![sceneView respondsToSelector:displaySel]) return;
+    id factory = CallClass0(NSClassFromString(@"SBApplicationSceneView"), @"defaultDisplayModeAnimationFactory");
+    ((void (*)(id, SEL, NSInteger, id, id))objc_msgSend)(sceneView, displaySel, (NSInteger)4, factory, nil);
+}
+
+// 0.0.22: Mode 2 (Live/foreground) is back. It is the only mechanism on this
+// device that makes the scene transaction pull the app process up — 0.0.21
+// skipped it and the scenes never activated (log: scene=(nil) active=0,
+// nothing displayed). The crash Mode 2 used to cause is handled three ways:
+//   1. the poll stands down from Live if the app never starts (0.0.19 flow),
+//   2. hide/teardown switch the controller back to mode 0 first,
+//   3. the NSException filter above swallows the consistency assertion.
 static void ConfigureAppViewController(id viewController, id entity, id application)
 {
+    (void)application;
+    
     SEL ignoresSel = NSSelectorFromString(@"setIgnoresOcclusions:");
     if ([viewController respondsToSelector:ignoresSel]) {
         ((void (*)(id, SEL, BOOL))objc_msgSend)(viewController, ignoresSel, YES);
     }
     
-    CLog(@"host: skipping Mode 2 (let SpringBoard manage foreground)");
+    SetCurrentMode(viewController, 2);
+    CLog(@"host: currentMode set to 2 (foreground)");
     
     id activationSettings = Call0(viewController, @"_activationSettings");
     if (activationSettings) {
@@ -491,15 +632,8 @@ static void ConfigureAppViewController(id viewController, id entity, id applicat
     
     Call0(viewController, @"_createSceneViewController");
     
-    id sceneView = Call0(viewController, @"appView");
-    if (sceneView) {
-        SEL displaySel = NSSelectorFromString(@"setDisplayMode:animationFactory:completion:");
-        id factory = CallClass0(NSClassFromString(@"SBApplicationSceneView"), @"defaultDisplayModeAnimationFactory");
-        if ([sceneView respondsToSelector:displaySel]) {
-            ((void (*)(id, SEL, NSInteger, id, id))objc_msgSend)(sceneView, displaySel, (NSInteger)4, factory, nil);
-            CLog(@"host: displayMode 4 applied");
-        }
-    }
+    ApplyDisplayMode4(viewController);
+    CLog(@"host: displayMode 4 applied");
 }
 
 static void ScaleAppViewIntoContainer(UIView *appView, UIView *container)
@@ -543,13 +677,62 @@ static void ScaleAppViewIntoContainer(UIView *appView, UIView *container)
     }
 }
 
-static HostSlot *HostApplication(NSString *bundleID, UIView *container)
+// Watches a freshly hosted slot. If the app process comes up, make sure the
+// controller is in Live mode (that is what drives live content). If it never
+// comes up, stand down from Live so the controller's mode matches the scene's
+// real background state — a stale Live is exactly what trips SpringBoard's
+// foreground-consistency assertion (the 0.0.20 crash loop). Polling stops as
+// soon as the user hides the overlay (gUserClosed), matching 0.0.19.
+static void ApplyModeWhenReady(int index, int attempt);
+
+static void ApplyModeWhenReady(int index, int attempt)
+{
+    HostSlot *slot = gSlots[index];
+    if (!slot || !slot.viewController) return;
+    if (gUserClosed) return;
+    
+    char tag = index == 0 ? 'L' : 'R';
+    BOOL running = BoolReturn(slot.application, @"isRunning", NO);
+    CLog(@"mode[%c]: poll attempt=%d running=%d", tag, attempt, running);
+    
+    if (attempt == 1) {
+        id scene = slot.handle ? Call0(slot.handle, @"sceneIfExists") : nil;
+        CLog(@"mode[%c]: scene=%@ active=%d",
+             tag,
+             scene ? NSStringFromClass([scene class]) : @"(nil)",
+             BoolReturn(scene, @"isActive", NO));
+    }
+    
+    if (running) {
+        SetCurrentMode(slot.viewController, 2);
+        CLog(@"mode[%c]: app running, live applied", tag);
+        return;
+    }
+    
+    if (attempt == 4) {
+        // ~8s and the app still has no process: stop insisting on Live.
+        // If the app starts later, the poll below re-applies Live.
+        SetCurrentMode(slot.viewController, 0);
+        CLog(@"mode[%c]: app not running, reverted to 0 (background)", tag);
+    }
+    
+    if (attempt < 15) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+            ApplyModeWhenReady(index, attempt + 1);
+        });
+    } else {
+        CLog(@"mode[%c]: app never started after 30s, giving up polling", tag);
+    }
+}
+
+static HostSlot *HostApplication(NSString *bundleID, UIView *container, int slotIndex)
 {
     if (bundleID.length == 0) return nil;
     
     HostSlot *slot = [HostSlot new];
     slot.bundleID = bundleID;
     slot.container = container;
+    slot.birth = CFAbsoluteTimeGetCurrent();
     
     Class appControllerClass = NSClassFromString(@"SBApplicationController");
     id appController = CallClass0(appControllerClass, @"sharedInstance");
@@ -638,13 +821,8 @@ static HostSlot *HostApplication(NSString *bundleID, UIView *container)
     
     CLog(@"host: %@ attached", bundleID);
     
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-        CLog(@"host: %@ state running=%d", bundleID, BoolReturn(application, @"isRunning", NO));
-        id scene = Call0(handle, @"sceneIfExists");
-        CLog(@"host: %@ scene=%@ active=%d",
-             bundleID,
-             scene ? NSStringFromClass([scene class]) : @"(nil)",
-             BoolReturn(scene, @"isActive", NO));
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        ApplyModeWhenReady(slotIndex, 1);
     });
     
     return slot;
@@ -653,6 +831,15 @@ static HostSlot *HostApplication(NSString *bundleID, UIView *container)
 static void TeardownSlot(HostSlot *slot)
 {
     if (!slot || !slot.viewController) return;
+    
+    // Back to background mode BEFORE invalidating: a controller holding Live
+    // while its scene tears down trips the foreground-consistency assertion.
+    @try {
+        SetCurrentMode(slot.viewController, 0);
+        CLog(@"teardown[%@]: mode back to 0", slot.bundleID);
+    } @catch (NSException *exception) {
+        CLog(@"teardown[%@]: mode 0 threw %@", slot.bundleID, exception.reason);
+    }
     
     NSArray<NSString *> *invalSels = @[
         @"invalidate",
@@ -695,11 +882,37 @@ static void TeardownAllHosts(void)
 #pragma mark - UI
 
 static UIWindow *gWindow;
-static UIWindow *gCloseWindow;
 static UIView *gPanes[2];
 static UIView *gDivider;
 static BOOL gTestMode;
 static UIButton *gToggleButton;
+
+static void RestoreSlot(int index)
+{
+    HostSlot *slot = gSlots[index];
+    if (!slot) return;
+    
+    BOOL running = BoolReturn(slot.application, @"isRunning", NO);
+    id scene = slot.handle ? Call0(slot.handle, @"sceneIfExists") : nil;
+    CLog(@"restore[%d]: %@ running=%d scene=%@",
+         index, slot.bundleID, running, scene ? NSStringFromClass([scene class]) : @"(nil)");
+    
+    // Scene was destroyed while hidden — re-host from scratch (bounded).
+    if (!scene) {
+        if (slot.rehostAttempts < 5) {
+            slot.rehostAttempts++;
+            CLog(@"restore[%d]: scene gone, re-hosting (attempt %d)", index, slot.rehostAttempts);
+            TeardownSlot(slot);
+            gSlots[index] = HostApplication(slot.bundleID, slot.container, index);
+        }
+        return;
+    }
+    
+    if (running && slot.viewController) {
+        SlotSetMode(index, 2);
+        ApplyDisplayMode4(slot.viewController);
+    }
+}
 
 @interface CockpitControl : NSObject
 - (void)toggleTapped;
@@ -709,19 +922,32 @@ static UIButton *gToggleButton;
 
 - (void)toggleTapped
 {
-    if (gUserClosed) {
-        // Restore — show the overlay again.
-        gUserClosed = NO;
-        if (gWindow) gWindow.hidden = NO;
-        if (gCloseWindow) gCloseWindow.hidden = NO;
-        [gToggleButton setTitle:@"✕" forState:UIControlStateNormal];
-        CLog(@"ui: overlay restored by user");
-    } else {
-        // Hide — but keep everything alive, just invisible.
+    if (!gUserClosed) {
+        // Hide the panes but keep the window and button alive so the user can
+        // tap again to restore. Stand the controllers down from Live first —
+        // a controller holding Live while its scene gets occluded is the
+        // classic foreground-consistency crash trigger (0.0.19 knew this).
         gUserClosed = YES;
-        if (gWindow) gWindow.hidden = YES;
-        if (gCloseWindow) gCloseWindow.hidden = YES;
-        CLog(@"ui: overlay hidden by user");
+        for (int index = 0; index < 2; index++) {
+            if (gPanes[index]) gPanes[index].hidden = YES;
+        }
+        if (gDivider) gDivider.hidden = YES;
+        [gToggleButton setTitle:@"⟳" forState:UIControlStateNormal];
+        for (int index = 0; index < 2; index++) {
+            SlotSetMode(index, 0);
+        }
+        CLog(@"ui: overlay hidden by user (hosting kept alive)");
+    } else {
+        gUserClosed = NO;
+        for (int index = 0; index < 2; index++) {
+            if (gPanes[index]) gPanes[index].hidden = NO;
+        }
+        if (gDivider) gDivider.hidden = NO;
+        [gToggleButton setTitle:@"✕" forState:UIControlStateNormal];
+        for (int index = 0; index < 2; index++) {
+            RestoreSlot(index);
+        }
+        CLog(@"ui: overlay restored by user");
     }
 }
 
@@ -753,12 +979,15 @@ static void Layout(void)
         gDivider.frame = CGRectMake(sideMargin + leftWidth, 0, 2, bounds.size.height);
     }
     
-    // Position toggle button at top-right of left pane.
-    if (gCloseWindow && gPanes[0]) {
+    // Position toggle button at top-right of left pane. It lives INSIDE
+    // gWindow: a second UIWindow on the car display never received taps
+    // (0.0.20/0.0.21 logs show zero toggleTapped calls), while gWindow's
+    // own touch pipeline was proven to work in milestone 1.
+    if (gToggleButton && gPanes[0]) {
         CGFloat paneWidth = gPanes[0].bounds.size.width;
         CGFloat paneX = gPanes[0].frame.origin.x;
-        gCloseWindow.frame = CGRectMake(paneX + paneWidth - 60, 12, 48, 48);
-        gCloseWindow.hidden = gUserClosed;
+        gToggleButton.frame = CGRectMake(paneX + paneWidth - 64, 12, 48, 48);
+        [gWindow bringSubviewToFront:gToggleButton];
     }
 }
 
@@ -823,43 +1052,23 @@ static void CreateInterface(BOOL testMode)
     gDivider.backgroundColor = [UIColor whiteColor];
     [window addSubview:gDivider];
     
-    // Toggle button — always visible, lets user hide/show the overlay.
+    // Toggle button — always visible, lets user hide/show the panes.
+    // It is a subview of the same window as the panes so it shares the
+    // display and the touch pipeline that already works; the button also
+    // survives "close" (only the panes hide), so there is always a way
+    // back in.
+    if (!gControl) gControl = [CockpitControl new];
     UIButton *toggle = [UIButton buttonWithType:UIButtonTypeSystem];
     [toggle setTitle:@"✕" forState:UIControlStateNormal];
     [toggle setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    toggle.titleLabel.font = [UIFont systemFontOfSize:28 weight:UIFontWeightBold];
-    toggle.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.35];
+    toggle.titleLabel.font = [UIFont systemFontOfSize:26 weight:UIFontWeightBold];
+    toggle.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.45];
     toggle.layer.cornerRadius = 24;
-    if (!gControl) gControl = [CockpitControl new];
+    toggle.layer.zPosition = 9999;
     [toggle addTarget:gControl action:@selector(toggleTapped) forControlEvents:UIControlEventTouchUpInside];
-    
-    UIWindow *toggleWindow = nil;
-    if (testMode) {
-        for (UIScene *scene in [[UIApplication sharedApplication] connectedScenes]) {
-            if ([scene isKindOfClass:[UIWindowScene class]] && scene.activationState == UISceneActivationStateForegroundActive) {
-                toggleWindow = [[UIWindow alloc] initWithWindowScene:(UIWindowScene *)scene];
-                break;
-            }
-        }
-        if (!toggleWindow) {
-            toggleWindow = [[UIWindow alloc] initWithFrame:CGRectMake(0, 0, 48, 48)];
-        }
-    } else {
-        id windowScene = Call0(window, @"windowScene");
-        if (windowScene) {
-            toggleWindow = [[UIWindow alloc] initWithWindowScene:windowScene];
-        }
-        if (!toggleWindow) {
-            toggleWindow = [[UIWindow alloc] initWithFrame:CGRectMake(0, 0, 48, 48)];
-        }
-    }
-    toggleWindow.windowLevel = 10000000;
-    toggleWindow.backgroundColor = [UIColor clearColor];
-    toggleWindow.hidden = NO;
-    [toggleWindow addSubview:toggle];
+    [window addSubview:toggle];
     
     gWindow = window;
-    gCloseWindow = toggleWindow;
     gToggleButton = toggle;
     
     Layout();
@@ -884,13 +1093,13 @@ static void CreateInterface(BOOL testMode)
     if (testMode) {
         NSString *bundleID = HostBundleID1();
         CLog(@"ui: hosting %@ in test mode", bundleID);
-        gSlots[0] = HostApplication(bundleID, gPanes[0]);
+        gSlots[0] = HostApplication(bundleID, gPanes[0], 0);
     } else {
         NSString *bid1 = HostBundleID1();
         NSString *bid2 = HostBundleID2();
         CLog(@"ui: hosting %@ + %@ in car mode", bid1, bid2);
-        gSlots[0] = HostApplication(bid1, gPanes[0]);
-        gSlots[1] = HostApplication(bid2, gPanes[1]);
+        gSlots[0] = HostApplication(bid1, gPanes[0], 0);
+        gSlots[1] = HostApplication(bid2, gPanes[1], 1);
     }
 }
 
@@ -914,6 +1123,28 @@ static BOOL CarScreenConnected(void)
     return NO;
 }
 
+// If the app process is alive but its scene died (e.g. the system reaped it
+// while the overlay was hidden), re-host that slot so content comes back.
+// Bounded by rehostAttempts so a device that never launches the apps cannot
+// enter a hosting loop.
+static void HealthCheckSlots(void)
+{
+    double now = CFAbsoluteTimeGetCurrent();
+    for (int index = 0; index < 2; index++) {
+        HostSlot *slot = gSlots[index];
+        if (!slot || !slot.viewController || !slot.application) continue;
+        if (now - slot.birth < 20) continue;
+        if (!BoolReturn(slot.application, @"isRunning", NO)) continue;
+        id scene = slot.handle ? Call0(slot.handle, @"sceneIfExists") : nil;
+        if (scene) continue;
+        if (slot.rehostAttempts >= 3) continue;
+        slot.rehostAttempts++;
+        CLog(@"health[%d]: app running but scene gone, re-hosting (attempt %d)", index, slot.rehostAttempts);
+        TeardownSlot(slot);
+        gSlots[index] = HostApplication(slot.bundleID, slot.container, index);
+    }
+}
+
 static void Tick(void)
 {
     @try {
@@ -924,7 +1155,6 @@ static void Tick(void)
             if (gWindow && !gWindow.hidden) {
                 TeardownAllHosts();
                 gWindow.hidden = YES;
-                gCloseWindow.hidden = YES;
                 CLog(@"lifecycle: car display gone, window hidden");
             }
             return;
@@ -935,8 +1165,6 @@ static void Tick(void)
                 TeardownAllHosts();
                 gWindow.hidden = YES;
                 gWindow = nil;
-                gCloseWindow.hidden = YES;
-                gCloseWindow = nil;
                 gPanes[0] = nil;
                 gPanes[1] = nil;
                 gDivider = nil;
@@ -946,7 +1174,9 @@ static void Tick(void)
             } else {
                 if (gWindow.hidden && !gUserClosed) {
                     gWindow.hidden = NO;
-                    gCloseWindow.hidden = NO;
+                }
+                if (!gUserClosed) {
+                    HealthCheckSlots();
                 }
                 return;
             }
@@ -973,7 +1203,8 @@ static void CockpitInit(void)
     @autoreleasepool {
         if (Disabled()) return;
         
-        CLog(@"--- Cockpit 0.0.21 loaded ---");
+        CLog(@"--- Cockpit 0.0.22 loaded ---");
+        InstallExceptionFilter();
         InstallCrashHandlers();
         
         // Read crash count from last session.
