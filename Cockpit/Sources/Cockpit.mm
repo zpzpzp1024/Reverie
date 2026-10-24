@@ -39,6 +39,8 @@
 #define COCKPIT_CRASHED "/var/mobile/Library/Preferences/lilliana.cockpit.crashed"
 #define COCKPIT_NEWSCENE "/var/mobile/Library/Preferences/lilliana.cockpit.newscene"
 #define COCKPIT_MODE    "/var/mobile/Library/Preferences/lilliana.cockpit.mode"
+#define COCKPIT_HIDE    "/var/mobile/Library/Preferences/lilliana.cockpit.hide"
+#define COCKPIT_CRASHCOUNT "/var/mobile/Library/Preferences/lilliana.cockpit.crashcount"
 
 static NSString *const kPrefsHostApp  = @"HostBundleID";
 static NSString *const kPrefsHostApp2 = @"HostBundleID2";
@@ -133,7 +135,12 @@ static void CockpitExceptionHandler(NSException *exception)
         CLog(@"cockpit stack: %@", line);
     }
     [[NSFileManager defaultManager] createFileAtPath:@COCKPIT_CRASHED contents:[NSData data] attributes:nil];
-}
+    
+    // Increment crash count for loop protection.
+    gCrashCount++;
+    NSString *countStr = [NSString stringWithFormat:@"%d", gCrashCount];
+    [countStr writeToFile:@COCKPIT_CRASHCOUNT atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    CLog(@"*** cockpit: crash count now %d", gCrashCount);
 
 static void InstallCrashHandlers(void)
 {
@@ -469,58 +476,12 @@ static void DumpProbe(void)
 
 static HostSlot *gSlots[2];
 static BOOL gUserClosed = NO;
+static BOOL gHidden = NO;  // hidden via lilliana.cockpit.hide marker
+static int gCrashCount = 0;
 
-static BOOL SetCurrentMode(id viewController, NSInteger mode)
-{
-    if (!viewController) return NO;
-    if ([viewController respondsToSelector:NSSelectorFromString(@"_setCurrentMode:")]) {
-        CallInteger(viewController, @"_setCurrentMode:", mode);
-        return YES;
-    }
-    @try {
-        [viewController setValue:@(mode) forKey:@"currentMode"];
-        return YES;
-    } @catch (NSException *exception) {
-        CLog(@"mode: KVC failed: %@", exception.reason);
-    }
-    return NO;
-}
-
-// For multi-app mode: we set Mode 2 at init and don't poll isRunning.
-// The isRunning check is unreliable in CarPlay scenarios (returns 0 even
-// when the app is clearly running — user confirmed they can interact
-// with the app). Polling and then reverting to Mode 0 after 30s was
-// causing the app to disappear.
-static void ApplyModeWhenReady(id viewController, id application, int attempt)
-{
-    if (!viewController || gUserClosed) return;
-    
-    BOOL running = BoolReturn(application, @"isRunning", NO);
-    CLog(@"mode[%@]: poll attempt=%d running=%d",
-         [gSlots[0].viewController isEqual:viewController] ? @"L" : @"R",
-         attempt, running);
-    
-    // On CarPlay, isRunning may never return YES even though the app is
-    // actually running and interactive. We keep Mode 2 set at init time
-    // and don't revert to 0 — the user confirmed the app works.
-    // Only poll a few times for logging, but never downgrade.
-    if (running && attempt > 0) {
-        @try {
-            SetCurrentMode(viewController, 2);
-            CLog(@"mode: re-applied Mode 2 (running detected)");
-        } @catch (NSException *e) {
-            CLog(@"mode: re-apply threw %@: %@", e.name, e.reason);
-        }
-        return;
-    }
-    
-    if (attempt < 3) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-            ApplyModeWhenReady(viewController, application, attempt + 1);
-        });
-    }
-    // After 3 attempts (~6s), stop polling. Mode 2 stays as-is.
-}
+// SetCurrentMode and ApplyModeWhenReady removed in 0.0.21 — we no longer
+// set Mode 2 on the SBAppViewController, which was the root cause of the
+// "foreground status changed out from underneath us" crash.
 
 static void ConfigureAppViewController(id viewController, id entity, id application)
 {
@@ -529,8 +490,17 @@ static void ConfigureAppViewController(id viewController, id entity, id applicat
         ((void (*)(id, SEL, BOOL))objc_msgSend)(viewController, ignoresSel, YES);
     }
     
-    SetCurrentMode(viewController, 2);
-    CLog(@"host: currentMode set to 2 (foreground)");
+    // Do NOT set Mode 2 here. Setting Mode 2 (Live/foreground) causes
+    // NSInternalInconsistencyException when another app is launched on the
+    // phone — SpringBoard changes the scene's foreground status to NO, but
+    // the SBAppViewController still thinks it's Live. CarBridge also
+    // manipulates scene state, compounding the conflict.
+    // Instead, rely on setIgnoresOcclusions:YES + the scene update
+    // transaction with deliveringActions:YES to bring the app up, and let
+    // SpringBoard manage the foreground/background lifecycle naturally.
+    // The displayMode 4 (LiveContent) on the scene view is what makes the
+    // app's content visible even without explicit Mode 2.
+    CLog(@"host: skipping Mode 2 (let SpringBoard manage foreground)");
     
     id activationSettings = Call0(viewController, @"_activationSettings");
     if (activationSettings) {
@@ -692,10 +662,8 @@ static HostSlot *HostApplication(NSString *bundleID, UIView *container)
     
     ConfigureAppViewController(viewController, entity, application);
     
-    // Poll for running status (logging only, don't downgrade mode).
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-        ApplyModeWhenReady(viewController, application, 1);
-    });
+    // No mode polling — we don't set Mode 2 anymore, so there's nothing
+    // to re-apply or downgrade. The scene transaction handles app launch.
     
     UIView *appView = Call0(viewController, @"view");
     if (!appView) {
@@ -724,19 +692,13 @@ static void TeardownSlot(HostSlot *slot)
 {
     if (!slot || !slot.viewController) return;
     
-    @try {
-        CallInteger(slot.viewController, @"_setCurrentMode:", 0);
-        CLog(@"teardown[%@]: mode set to 0", slot.bundleID);
-    } @catch (NSException *e) {
-        CLog(@"teardown[%@]: mode reset threw %@", slot.bundleID, e.reason);
-    }
-    
+    // No mode reset — we never set Mode 2, so no need to revert.
+    // Just invalidate the view controller.
     NSArray<NSString *> *invalSels = @[
-        @"_invalidateForReason:",
-        @"_invalidate",
         @"invalidate",
+        @"_invalidate",
+        @"_invalidateForReason:",
         @"_tearDown",
-        @"_invalidateForReason:isCrash:",
     ];
     for (NSString *selName in invalSels) {
         SEL sel = NSSelectorFromString(selName);
@@ -788,17 +750,9 @@ static BOOL gTestMode;
 {
     gUserClosed = YES;
     
-    for (int i = 0; i < 2; i++) {
-        if (gSlots[i] && gSlots[i].viewController) {
-            @try {
-                CallInteger(gSlots[i].viewController, @"_setCurrentMode:", 0);
-                CLog(@"ui[%@]: mode set to 0", gSlots[i].bundleID);
-            } @catch (NSException *e) {
-                CLog(@"ui[%@]: mode reset threw %@", gSlots[i].bundleID, e.reason);
-            }
-        }
-    }
-    
+    // Just hide the window — no mode changes. Since we never set Mode 2,
+    // there's no need to revert to Mode 0. Hiding the window is enough
+    // to make the overlay disappear without triggering scene state assertions.
     gWindow.hidden = YES;
     gCloseWindow.hidden = YES;
     CLog(@"ui: overlay hidden by user");
@@ -1003,6 +957,27 @@ static void Tick(void)
         BOOL carConnected = CarScreenConnected();
         BOOL testMode = (!carConnected && TestModeEnabled());
         
+        // Check hide marker for temporary hide/restore without CarPlay disconnect.
+        BOOL hideMarker = FileExists(@COCKPIT_HIDE);
+        if (hideMarker && !gHidden) {
+            gHidden = YES;
+            if (gWindow && !gWindow.hidden) {
+                gWindow.hidden = YES;
+                gCloseWindow.hidden = YES;
+                CLog(@"lifecycle: hidden via marker file");
+            }
+        } else if (!hideMarker && gHidden) {
+            gHidden = NO;
+            gUserClosed = NO;  // also clear user-closed so it can reshow
+            if (gWindow && gWindow.hidden) {
+                gWindow.hidden = NO;
+                gCloseWindow.hidden = NO;
+                CLog(@"lifecycle: restored via marker file removal");
+            }
+        }
+        
+        if (gHidden) return;
+        
         if (!carConnected && !testMode) {
             if (gWindow && !gWindow.hidden) {
                 TeardownAllHosts();
@@ -1035,6 +1010,13 @@ static void Tick(void)
         if (gUserClosed) return;
         if (!PrefBool(kPrefsEnabled, YES)) return;
         
+        // Crash loop protection: if we crashed 3+ times in a row,
+        // stop trying to create the interface.
+        if (gCrashCount >= 3) {
+            CLog(@"lifecycle: crash loop detected (%d), skipping create", gCrashCount);
+            return;
+        }
+        
         CreateInterface(testMode);
     } @catch (NSException *exception) {
         CLog(@"tick: exception %@: %@", exception.name, exception.reason);
@@ -1047,8 +1029,21 @@ static void CockpitInit(void)
     @autoreleasepool {
         if (Disabled()) return;
         
-        CLog(@"--- Cockpit 0.0.20 loaded ---");
+        CLog(@"--- Cockpit 0.0.21 loaded ---");
         InstallCrashHandlers();
+        
+        // Read crash count from last session.
+        NSString *crashCountText = [NSString stringWithContentsOfFile:@COCKPIT_CRASHCOUNT encoding:NSUTF8StringEncoding error:nil];
+        gCrashCount = [crashCountText.intValue] ?: 0;
+        if (gCrashCount > 0) {
+            CLog(@"init: crash count from last session = %d", gCrashCount);
+            if (gCrashCount >= 3) {
+                // Reset crash count — we'll try again this session.
+                gCrashCount = 0;
+                [[NSFileManager defaultManager] removeItemAtPath:@COCKPIT_CRASHCOUNT error:nil];
+                CLog(@"init: crash count reset, will try again");
+            }
+        }
         
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
             LogPrefsState();
