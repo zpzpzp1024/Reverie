@@ -1,10 +1,12 @@
 // Cockpit - CarPlay split view experiments
 //
+// 0.0.23: scene-state liveness (isRunning is dead weight on this device),
+// auto-recovery via nudge-then-rehost health check, toggle button at the
+// whole-screen top-left with 40% opaque background.
 // 0.0.22: restore Mode 2 hosting (only mechanism that pulls the app process
-// up), contain the foreground-consistency crash three ways (mode stand-down
-// poll, mode 0 before hide/teardown, NSException assertion filter), and fix
-// the toggle button (it lives inside the main window now — a second UIWindow
-// on the car display never received taps).
+// up), contain the foreground-consistency crash (mode 0 before hide/teardown,
+// NSException assertion filter), fix the toggle button (it lives inside the
+// main window now — a second UIWindow on the car display never received taps).
 //
 // The hosting pattern follows carplay-cast (Apache-2.0):
 //   AVExternalDevice.currentCarPlayExternalDevice
@@ -447,7 +449,9 @@ static void DumpProbe(void)
 @property id application;
 @property id handle;
 @property double birth;          // CFAbsoluteTime when hosted
-@property int rehostAttempts;    // bounded automatic re-host counter
+@property double lastRehost;     // rate-limits re-host/reactivation attempts
+@property int rehostCount;       // total re-hosts, for logs
+@property int failedNudges;      // consecutive reactivations that didn't stick
 @end
 
 @implementation HostSlot
@@ -593,13 +597,16 @@ static void ApplyDisplayMode4(id viewController)
     ((void (*)(id, SEL, NSInteger, id, id))objc_msgSend)(sceneView, displaySel, (NSInteger)4, factory, nil);
 }
 
-// 0.0.22: Mode 2 (Live/foreground) is back. It is the only mechanism on this
-// device that makes the scene transaction pull the app process up — 0.0.21
-// skipped it and the scenes never activated (log: scene=(nil) active=0,
-// nothing displayed). The crash Mode 2 used to cause is handled three ways:
-//   1. the poll stands down from Live if the app never starts (0.0.19 flow),
-//   2. hide/teardown switch the controller back to mode 0 first,
-//   3. the NSException filter above swallows the consistency assertion.
+// 0.0.22: Mode 2 (Live/foreground) is the only mechanism on this device that
+// makes the scene transaction pull the app process up — 0.0.21 skipped it and
+// the scenes never activated (log: scene=(nil) active=0, nothing displayed).
+// The crash Mode 2 used to cause is handled by:
+//   1. hide/teardown switch the controller back to mode 0 first,
+//   2. the NSException filter below swallows the consistency assertion.
+// Mode 2 is NEVER auto-reverted while hosting: 0.0.23 dropped the isRunning
+// based revert (isRunning stays 0 on this device even while content renders,
+// and the revert killed working displays ~8s in). Recovery is the health
+// check's job: nudge, then re-host.
 static void ConfigureAppViewController(id viewController, id entity, id application)
 {
     (void)application;
@@ -677,12 +684,12 @@ static void ScaleAppViewIntoContainer(UIView *appView, UIView *container)
     }
 }
 
-// Watches a freshly hosted slot. If the app process comes up, make sure the
-// controller is in Live mode (that is what drives live content). If it never
-// comes up, stand down from Live so the controller's mode matches the scene's
-// real background state — a stale Live is exactly what trips SpringBoard's
-// foreground-consistency assertion (the 0.0.20 crash loop). Polling stops as
-// soon as the user hides the overlay (gUserClosed), matching 0.0.19.
+// 0.0.23: the liveness signal is the SCENE, not SBApplication.isRunning. On
+// this device isRunning stays 0 forever even while the scene renders live
+// content, and the 0.0.22 revert-to-0 keyed on it killed a working display
+// ~8s in (log: scene=FBScene active=1 running=0, then "reverted to 0").
+// Mode 2 is therefore never reverted here. Once the scene is confirmed
+// active the poll stops; if the scene later dies, HealthCheckSlots re-hosts.
 static void ApplyModeWhenReady(int index, int attempt);
 
 static void ApplyModeWhenReady(int index, int attempt)
@@ -692,28 +699,15 @@ static void ApplyModeWhenReady(int index, int attempt)
     if (gUserClosed) return;
     
     char tag = index == 0 ? 'L' : 'R';
-    BOOL running = BoolReturn(slot.application, @"isRunning", NO);
-    CLog(@"mode[%c]: poll attempt=%d running=%d", tag, attempt, running);
+    id scene = slot.handle ? Call0(slot.handle, @"sceneIfExists") : nil;
+    BOOL active = BoolReturn(scene, @"isActive", NO);
+    CLog(@"mode[%c]: poll attempt=%d scene=%@ active=%d",
+         tag, attempt, scene ? @"FBScene" : @"(nil)", active);
     
-    if (attempt == 1) {
-        id scene = slot.handle ? Call0(slot.handle, @"sceneIfExists") : nil;
-        CLog(@"mode[%c]: scene=%@ active=%d",
-             tag,
-             scene ? NSStringFromClass([scene class]) : @"(nil)",
-             BoolReturn(scene, @"isActive", NO));
-    }
-    
-    if (running) {
+    if (scene && active) {
         SetCurrentMode(slot.viewController, 2);
-        CLog(@"mode[%c]: app running, live applied", tag);
+        CLog(@"mode[%c]: scene active, live confirmed", tag);
         return;
-    }
-    
-    if (attempt == 4) {
-        // ~8s and the app still has no process: stop insisting on Live.
-        // If the app starts later, the poll below re-applies Live.
-        SetCurrentMode(slot.viewController, 0);
-        CLog(@"mode[%c]: app not running, reverted to 0 (background)", tag);
     }
     
     if (attempt < 15) {
@@ -721,7 +715,7 @@ static void ApplyModeWhenReady(int index, int attempt)
             ApplyModeWhenReady(index, attempt + 1);
         });
     } else {
-        CLog(@"mode[%c]: app never started after 30s, giving up polling", tag);
+        CLog(@"mode[%c]: scene never came up after 30s, handing over to health check", tag);
     }
 }
 
@@ -892,26 +886,26 @@ static void RestoreSlot(int index)
     HostSlot *slot = gSlots[index];
     if (!slot) return;
     
-    BOOL running = BoolReturn(slot.application, @"isRunning", NO);
     id scene = slot.handle ? Call0(slot.handle, @"sceneIfExists") : nil;
-    CLog(@"restore[%d]: %@ running=%d scene=%@",
-         index, slot.bundleID, running, scene ? NSStringFromClass([scene class]) : @"(nil)");
+    BOOL active = BoolReturn(scene, @"isActive", NO);
+    CLog(@"restore[%d]: %@ scene=%@ active=%d",
+         index, slot.bundleID,
+         scene ? NSStringFromClass([scene class]) : @"(nil)", active);
     
-    // Scene was destroyed while hidden — re-host from scratch (bounded).
-    if (!scene) {
-        if (slot.rehostAttempts < 5) {
-            slot.rehostAttempts++;
-            CLog(@"restore[%d]: scene gone, re-hosting (attempt %d)", index, slot.rehostAttempts);
-            TeardownSlot(slot);
-            gSlots[index] = HostApplication(slot.bundleID, slot.container, index);
-        }
+    if (scene && slot.viewController) {
+        SlotSetMode(index, 2);
+        ApplyDisplayMode4(slot.viewController);
         return;
     }
     
-    if (running && slot.viewController) {
-        SlotSetMode(index, 2);
-        ApplyDisplayMode4(slot.viewController);
-    }
+    // Scene was destroyed while hidden — re-host from scratch. No retry cap:
+    // this only runs on an explicit user tap, and lastRehost still rate-limits
+    // it against the health check's attempts.
+    slot.rehostCount++;
+    slot.lastRehost = CFAbsoluteTimeGetCurrent();
+    CLog(@"restore[%d]: scene gone, re-hosting (#%d)", index, slot.rehostCount);
+    TeardownSlot(slot);
+    gSlots[index] = HostApplication(slot.bundleID, slot.container, index);
 }
 
 @interface CockpitControl : NSObject
@@ -979,14 +973,12 @@ static void Layout(void)
         gDivider.frame = CGRectMake(sideMargin + leftWidth, 0, 2, bounds.size.height);
     }
     
-    // Position toggle button at top-right of left pane. It lives INSIDE
-    // gWindow: a second UIWindow on the car display never received taps
-    // (0.0.20/0.0.21 logs show zero toggleTapped calls), while gWindow's
-    // own touch pipeline was proven to work in milestone 1.
-    if (gToggleButton && gPanes[0]) {
-        CGFloat paneWidth = gPanes[0].bounds.size.width;
-        CGFloat paneX = gPanes[0].frame.origin.x;
-        gToggleButton.frame = CGRectMake(paneX + paneWidth - 64, 12, 48, 48);
+    // Toggle button sits at the very top-left corner of the WHOLE car display
+    // (window coordinates), not the left pane, so it never covers hosted
+    // content. It lives INSIDE gWindow: a second UIWindow on the car display
+    // never received taps (0.0.20/0.0.21 logs show zero toggleTapped calls).
+    if (gToggleButton) {
+        gToggleButton.frame = CGRectMake(8, 8, 48, 48);
         [gWindow bringSubviewToFront:gToggleButton];
     }
 }
@@ -1056,13 +1048,13 @@ static void CreateInterface(BOOL testMode)
     // It is a subview of the same window as the panes so it shares the
     // display and the touch pipeline that already works; the button also
     // survives "close" (only the panes hide), so there is always a way
-    // back in.
+    // back in. 40% opaque background per user request (very subtle).
     if (!gControl) gControl = [CockpitControl new];
     UIButton *toggle = [UIButton buttonWithType:UIButtonTypeSystem];
     [toggle setTitle:@"✕" forState:UIControlStateNormal];
     [toggle setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     toggle.titleLabel.font = [UIFont systemFontOfSize:26 weight:UIFontWeightBold];
-    toggle.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.45];
+    toggle.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.4];
     toggle.layer.cornerRadius = 24;
     toggle.layer.zPosition = 9999;
     [toggle addTarget:gControl action:@selector(toggleTapped) forControlEvents:UIControlEventTouchUpInside];
@@ -1123,23 +1115,43 @@ static BOOL CarScreenConnected(void)
     return NO;
 }
 
-// If the app process is alive but its scene died (e.g. the system reaped it
-// while the overlay was hidden), re-host that slot so content comes back.
-// Bounded by rehostAttempts so a device that never launches the apps cannot
-// enter a hosting loop.
+// Auto-recovery (user choice, 0.0.23): when a hosted app's scene dies
+// (system reclaim, crash, force-kill on the phone), re-host it so the pane
+// fills again. The scene object itself is the liveness signal — isRunning is
+// useless on this device. A scene that exists but went inactive first gets a
+// cheap "nudge" (mode 2 + displayMode 4); two nudges that don't stick
+// escalate to a full re-host. Everything is rate-limited by a 15s per-slot
+// cooldown; the birth grace window lets a fresh host come up undisturbed.
 static void HealthCheckSlots(void)
 {
     double now = CFAbsoluteTimeGetCurrent();
     for (int index = 0; index < 2; index++) {
         HostSlot *slot = gSlots[index];
-        if (!slot || !slot.viewController || !slot.application) continue;
+        if (!slot || !slot.viewController) continue;
         if (now - slot.birth < 20) continue;
-        if (!BoolReturn(slot.application, @"isRunning", NO)) continue;
+        if (now - slot.lastRehost < 15) continue;
+        
         id scene = slot.handle ? Call0(slot.handle, @"sceneIfExists") : nil;
-        if (scene) continue;
-        if (slot.rehostAttempts >= 3) continue;
-        slot.rehostAttempts++;
-        CLog(@"health[%d]: app running but scene gone, re-hosting (attempt %d)", index, slot.rehostAttempts);
+        BOOL active = BoolReturn(scene, @"isActive", NO);
+        
+        if (scene && active) {
+            slot.failedNudges = 0;
+            continue;
+        }
+        
+        slot.lastRehost = now;
+        
+        if (scene && slot.failedNudges < 2) {
+            slot.failedNudges++;
+            CLog(@"health[%d]: scene inactive, nudging back to live (nudge %d)", index, slot.failedNudges);
+            SlotSetMode(index, 2);
+            ApplyDisplayMode4(slot.viewController);
+            continue;
+        }
+        
+        slot.rehostCount++;
+        slot.failedNudges = 0;
+        CLog(@"health[%d]: scene gone or unresponsive, re-hosting (#%d)", index, slot.rehostCount);
         TeardownSlot(slot);
         gSlots[index] = HostApplication(slot.bundleID, slot.container, index);
     }
@@ -1203,7 +1215,7 @@ static void CockpitInit(void)
     @autoreleasepool {
         if (Disabled()) return;
         
-        CLog(@"--- Cockpit 0.0.22 loaded ---");
+        CLog(@"--- Cockpit 0.0.23 loaded ---");
         InstallExceptionFilter();
         InstallCrashHandlers();
         
