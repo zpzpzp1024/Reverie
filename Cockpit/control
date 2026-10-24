@@ -1,6 +1,6 @@
 Package: lilliana.cockpit
 Name: Cockpit
-Version: 0.0.17
+Version: 0.0.18
 Architecture: iphoneos-arm64
 Description: CarPlay split view experiment: puts a window on the car display
 Maintainer: zpzpzp

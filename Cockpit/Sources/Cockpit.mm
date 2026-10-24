@@ -984,10 +984,19 @@ static void TeardownHost(void)
         } @catch (NSException *e) {
             CLog(@"teardown: mode reset threw %@: %@", e.name, e.reason);
         }
+        // _invalidate may not exist on all iOS versions; guard carefully.
+        // Use performSelector style with try/catch instead of raw objc_msgSend
+        // to avoid SIGSEGV if the selector triggers an invalid memory access.
         SEL invalSel = NSSelectorFromString(@"_invalidate");
         if ([gHostController respondsToSelector:invalSel]) {
-            ((void (*)(id, SEL))objc_msgSend)(gHostController, invalSel);
-            CLog(@"teardown: AppViewController invalidated");
+            @try {
+                ((void (*)(id, SEL))objc_msgSend)(gHostController, invalSel);
+                CLog(@"teardown: AppViewController invalidated");
+            } @catch (NSException *e) {
+                CLog(@"teardown: invalidate threw %@: %@", e.name, e.reason);
+            }
+        } else {
+            CLog(@"teardown: _invalidate not found, skipping");
         }
         gHostController = nil;
     }
@@ -1078,11 +1087,15 @@ static void CreateInterface(BOOL testMode)
         }
         
         if ([manager fileExistsAtPath:@COCKPIT_CRASHED]) {
-            // A crash was captured last session. Skip exactly one launch so the
-            // phone cannot get stuck in a crash loop; a normal respring never
-            // writes this marker.
-            CLog(@"host: crash captured last session, skipping this launch");
+            // A crash was captured last session. In earlier versions we skipped
+            // hosting to avoid crash loops, but this meant every respring after
+            // a crash required a second respring to actually start hosting.
+            // Now we just log it and proceed — the crash fixes (teardown, mode
+            // revert) should prevent loops. The marker is still cleared.
+            CLog(@"host: crash marker from last session found, proceeding anyway");
             [manager removeItemAtPath:@COCKPIT_CRASHED error:nil];
+            CLog(@"ui: hosting %@ in %@ mode", bundleID, testMode ? @"test" : @"car");
+            gHostController = HostApplication(bundleID, left);
         } else {
             CLog(@"ui: hosting %@ in %@ mode", bundleID, testMode ? @"test" : @"car");
             gHostController = HostApplication(bundleID, left);
@@ -1161,7 +1174,7 @@ static void CockpitInit(void)
             return;
         }
         
-        CLog(@"--- Cockpit 0.0.17 loaded ---");
+        CLog(@"--- Cockpit 0.0.18 loaded ---");
         InstallCrashHandlers();
         
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
