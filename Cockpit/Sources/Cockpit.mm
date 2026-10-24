@@ -272,7 +272,7 @@ static BOOL BoolReturn(id object, NSString *selector, BOOL fallback)
     return ((BOOL (*)(id, SEL))objc_msgSend)(object, sel);
 }
 
-static void CallInteger(id object, NSString *selector, NSInteger value)
+static void __attribute__((unused)) CallInteger(id object, NSString *selector, NSInteger value)
 {
     SEL sel = NSSelectorFromString(selector);
     if (!object || ![object respondsToSelector:sel]) return;
