@@ -355,6 +355,10 @@ static void LogHostingAPI(void)
     LogClassSelector(controller, @"_createSceneUpdateTransactionForApplicationSceneEntity:deliveringActions:", NO);
     LogClassSelector(controller, @"setIgnoresOcclusions:", NO);
     LogClassSelector(controller, @"_setCurrentMode:", NO);
+    LogClassSelector(controller, @"_invalidate", NO);
+    LogClassSelector(controller, @"invalidate", NO);
+    LogClassSelector(controller, @"_invalidateForReason:", NO);
+    LogClassSelector(controller, @"_tearDown", NO);
     LogClassSelector(entity, @"initWithApplicationSceneHandle:", NO);
     LogClassSelector(appController, @"sharedInstance", YES);
     LogClassSelector(appController, @"applicationWithBundleIdentifier:", NO);
@@ -372,6 +376,9 @@ static void LogHostingAPI(void)
     if (mainManager && mainManager != manager) {
         LogSelectors(mainManager, keywords);
     }
+    // Dump all SBAppViewController methods containing 'invalid' or 'tear' or 'dealloc'
+    // to find the correct selector for explicit invalidation.
+    LogSelectors(controller, @[@"invalid", @"tear", @"dealloc", @"destroy", @"cleanup"]);
     LogSelectors(NSClassFromString(@"SBApplication"), keywords);
 }
 
@@ -975,8 +982,9 @@ static UIWindow *MakeTestWindow(void)
 static void TeardownHost(void)
 {
     // Properly invalidate the AppViewController before its window goes away.
-    // Without _invalidate, SpringBoard raises:
+    // Without invalidation, SpringBoard raises:
     //   'AppViewController must be explicitly invalidated before it can deallocate'
+    // The selector name varies by iOS version — try several candidates.
     if (gHostController) {
         @try {
             CallInteger(gHostController, @"_setCurrentMode:", 0);
@@ -984,19 +992,43 @@ static void TeardownHost(void)
         } @catch (NSException *e) {
             CLog(@"teardown: mode reset threw %@: %@", e.name, e.reason);
         }
-        // _invalidate may not exist on all iOS versions; guard carefully.
-        // Use performSelector style with try/catch instead of raw objc_msgSend
-        // to avoid SIGSEGV if the selector triggers an invalid memory access.
-        SEL invalSel = NSSelectorFromString(@"_invalidate");
-        if ([gHostController respondsToSelector:invalSel]) {
+        // Try known invalidation selectors in order of likelihood.
+        // SBAppViewController on iOS 16 uses _invalidateForReason: (passing 0)
+        // or _invalidate; on some versions it's _tearDown.
+        NSArray<NSString *> *invalSels = @[
+            @"_invalidateForReason:",
+            @"_invalidate",
+            @"invalidate",
+            @"_tearDown",
+            @"_invalidateForReason:isCrash:",
+        ];
+        BOOL invalidated = NO;
+        for (NSString *selName in invalSels) {
+            SEL sel = NSSelectorFromString(selName);
+            if (![gHostController respondsToSelector:sel]) continue;
             @try {
-                ((void (*)(id, SEL))objc_msgSend)(gHostController, invalSel);
-                CLog(@"teardown: AppViewController invalidated");
+                if ([selName containsString:@":"]) {
+                    // Selector takes an argument — pass 0 (NoReason).
+                    ((void (*)(id, SEL, NSInteger))objc_msgSend)(gHostController, sel, 0);
+                } else {
+                    ((void (*)(id, SEL))objc_msgSend)(gHostController, sel);
+                }
+                CLog(@"teardown: called %@ successfully", selName);
+                invalidated = YES;
+                break;
             } @catch (NSException *e) {
-                CLog(@"teardown: invalidate threw %@: %@", e.name, e.reason);
+                CLog(@"teardown: %@ threw %@: %@", selName, e.name, e.reason);
             }
-        } else {
-            CLog(@"teardown: _invalidate not found, skipping");
+        }
+        if (!invalidated) {
+            CLog(@"teardown: no invalidation selector found, attempting KVC");
+            @try {
+                [gHostController setValue:@YES forKey:@"invalidated"];
+                CLog(@"teardown: KVC invalidated=YES succeeded");
+                invalidated = YES;
+            } @catch (NSException *e) {
+                CLog(@"teardown: KVC invalidated failed: %@", e.reason);
+            }
         }
         gHostController = nil;
     }
@@ -1112,10 +1144,27 @@ static BOOL Disabled(void)
     return [[NSFileManager defaultManager] fileExistsAtPath:@COCKPIT_OFF];
 }
 
+static BOOL CarScreenConnected(void)
+{
+    // Check UIScreen for a CarPlay screen — this stays true even when
+    // another app (e.g. Amap) takes over the CarPlay display, whereas
+    // CarDisplay() (AVExternalDevice) may return nil in that case.
+    for (UIScreen *screen in [UIScreen screens]) {
+        if (BoolReturn(screen, @"_isCarScreen", NO) || BoolReturn(screen, @"_isCarPlayScreen", NO)) {
+            return YES;
+        }
+        // CarPlay screens are typically the second screen with different bounds.
+        if (![[UIScreen mainScreen] isEqual:screen] && screen.bounds.size.width != [UIScreen mainScreen].bounds.size.width) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
 static void Tick(void)
 {
     @try {
-        BOOL carConnected = (CarDisplay() != nil);
+        BOOL carConnected = CarScreenConnected();
         BOOL testMode = (!carConnected && TestModeEnabled());
         
         if (!carConnected && !testMode) {
@@ -1174,7 +1223,7 @@ static void CockpitInit(void)
             return;
         }
         
-        CLog(@"--- Cockpit 0.0.18 loaded ---");
+        CLog(@"--- Cockpit 0.0.19 loaded ---");
         InstallCrashHandlers();
         
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
