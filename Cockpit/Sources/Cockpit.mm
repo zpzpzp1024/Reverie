@@ -1,7 +1,7 @@
 // Cockpit - CarPlay split view experiments
 //
-// Milestone 2: multi-app split screen on CarPlay display.
-// Hosts two apps side by side: left 60% + right 40%.
+// Milestone 1: prove that SpringBoard can put a window on the CarPlay display
+// and that an arbitrary app's scene can be hosted inside it.
 //
 // The hosting pattern follows carplay-cast (Apache-2.0):
 //   AVExternalDevice.currentCarPlayExternalDevice
@@ -39,20 +39,11 @@
 #define COCKPIT_CRASHED "/var/mobile/Library/Preferences/lilliana.cockpit.crashed"
 #define COCKPIT_NEWSCENE "/var/mobile/Library/Preferences/lilliana.cockpit.newscene"
 #define COCKPIT_MODE    "/var/mobile/Library/Preferences/lilliana.cockpit.mode"
-#define COCKPIT_HIDE    "/var/mobile/Library/Preferences/lilliana.cockpit.hide"
-#define COCKPIT_CRASHCOUNT "/var/mobile/Library/Preferences/lilliana.cockpit.crashcount"
 
 static NSString *const kPrefsHostApp  = @"HostBundleID";
-static NSString *const kPrefsHostApp2 = @"HostBundleID2";
-// static NSString *const kPrefsRatio = @"SplitRatio"; — unused in 0.0.20 (hardcoded kSplitRatio)
+static NSString *const kPrefsRatio    = @"SplitRatio";
 static NSString *const kPrefsEnabled  = @"Enabled";
 static NSString *const kPrefsTestMain = @"TestOnMainScreen";
-
-// Hardcoded for phase 1: left=didi 60%, right=amap 40%.
-// Will be replaced by prefs-based config later.
-static NSString *const kDefaultHost1 = @"com.xiaojukeji.didi";
-static NSString *const kDefaultHost2 = @"com.autonavi.amap";
-static CGFloat const kSplitRatio = 0.6;  // left pane gets 60% of usable area
 
 #pragma mark - Logging
 
@@ -128,9 +119,6 @@ static void CockpitSignalHandler(int signo)
     raise(signo);
 }
 
-// Forward declaration for crash loop protection.
-static int gCrashCount = 0;
-
 static void CockpitExceptionHandler(NSException *exception)
 {
     CLog(@"*** cockpit: uncaught %@: %@", exception.name, exception.reason);
@@ -138,12 +126,6 @@ static void CockpitExceptionHandler(NSException *exception)
         CLog(@"cockpit stack: %@", line);
     }
     [[NSFileManager defaultManager] createFileAtPath:@COCKPIT_CRASHED contents:[NSData data] attributes:nil];
-    
-    // Increment crash count for loop protection.
-    gCrashCount++;
-    NSString *countStr = [NSString stringWithFormat:@"%d", gCrashCount];
-    [countStr writeToFile:@COCKPIT_CRASHCOUNT atomically:YES encoding:NSUTF8StringEncoding error:nil];
-    CLog(@"*** cockpit: crash count now %d", gCrashCount);
 }
 
 static void InstallCrashHandlers(void)
@@ -177,7 +159,11 @@ static NSString *PrefString(NSString *key)
     return [value isKindOfClass:[NSString class]] ? value : nil;
 }
 
-// static CGFloat PrefFloat(NSString *key, CGFloat fallback) — unused in 0.0.20 (hardcoded ratio)
+static CGFloat PrefFloat(NSString *key, CGFloat fallback)
+{
+    id value = Pref(key);
+    return [value isKindOfClass:[NSNumber class]] ? [value doubleValue] : fallback;
+}
 
 // Marker files are easier to create from Filza than editing a plist.
 #define COCKPIT_TEST "/var/mobile/Library/Preferences/lilliana.cockpit.test"
@@ -196,23 +182,21 @@ static BOOL TestModeEnabled(void)
     return FileExists(@COCKPIT_TEST);
 }
 
-static NSString *HostBundleID1(void)
+static NSString *HostBundleID(void)
 {
     NSString *bundleID = PrefString(kPrefsHostApp);
-    if (bundleID.length) return bundleID;
+    if (bundleID.length) {
+        return bundleID;
+    }
     
     NSString *text = [NSString stringWithContentsOfFile:@COCKPIT_HOST encoding:NSUTF8StringEncoding error:nil];
     text = [text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    if (text.length) return text;
+    if (text.length) {
+        return text;
+    }
     
-    return kDefaultHost1;
-}
-
-static NSString *HostBundleID2(void)
-{
-    NSString *bundleID = PrefString(kPrefsHostApp2);
-    if (bundleID.length) return bundleID;
-    return kDefaultHost2;
+    // Default host: DiDi (ride-hailing app for CarPlay)
+    return @"com.xiaojukeji.didi";
 }
 
 static void LogPrefsState(void)
@@ -229,13 +213,18 @@ static void LogPrefsState(void)
          prefs != nil,
          (unsigned long)prefs.count);
     
-    CLog(@"prefs: testMarker=%d hostFile=%d enabled=%d testMode=%d host1=%@ host2=%@",
+    if (prefs) {
+        CLog(@"prefs: %@", prefs);
+    } else if ([manager fileExistsAtPath:path]) {
+        CLog(@"prefs: file exists but is not a readable dictionary");
+    }
+    
+    CLog(@"prefs: testMarker=%d hostFile=%d enabled=%d testMode=%d host=%@",
          FileExists(@COCKPIT_TEST),
          FileExists(@COCKPIT_HOST),
          PrefBool(kPrefsEnabled, YES),
          TestModeEnabled(),
-         HostBundleID1(),
-         HostBundleID2());
+         HostBundleID() ?: @"(none)");
 }
 
 #pragma mark - Runtime helpers
@@ -314,7 +303,9 @@ static void LogClassSelector(Class cls, NSString *selector, BOOL classMethod)
 
 static void LogSelectors(Class cls, NSArray<NSString *> *keywords)
 {
-    if (!cls) return;
+    if (!cls) {
+        return;
+    }
     
     unsigned int count = 0;
     Method *methods = class_copyMethodList(cls, &count);
@@ -333,7 +324,7 @@ static void LogSelectors(Class cls, NSArray<NSString *> *keywords)
     free(methods);
     
     [matches sortUsingSelector:@selector(compare:)];
-    CLog(@"api: %@ methods (%lu): %@",
+    CLog(@"api: %@ scene/identity (%lu): %@",
          NSStringFromClass(cls),
          (unsigned long)matches.count,
          [matches componentsJoinedByString:@" | "]);
@@ -357,14 +348,16 @@ static void LogHostingAPI(void)
     LogClassSelector(manager, @"_sceneIdentityForApplication:createPrimaryIfRequired:", NO);
     LogClassSelector(manager, @"fetchOrCreateApplicationSceneHandleForRequest:", NO);
     LogClassSelector(request, @"defaultRequestForApplication:sceneIdentity:displayIdentity:", YES);
+    LogClassSelector(request, @"requestForApplication:sceneIdentity:displayIdentity:", YES);
     LogClassSelector(controller, @"initWithIdentifier:andApplicationSceneEntity:", NO);
+    LogClassSelector(controller, @"initWithApplicationSceneEntity:", NO);
     LogClassSelector(controller, @"_createSceneViewController", NO);
     LogClassSelector(controller, @"_createSceneUpdateTransactionForApplicationSceneEntity:deliveringActions:", NO);
     LogClassSelector(controller, @"setIgnoresOcclusions:", NO);
     LogClassSelector(controller, @"_setCurrentMode:", NO);
     LogClassSelector(controller, @"_invalidate", NO);
-    LogClassSelector(controller, @"_invalidateForReason:", NO);
     LogClassSelector(controller, @"invalidate", NO);
+    LogClassSelector(controller, @"_invalidateForReason:", NO);
     LogClassSelector(controller, @"_tearDown", NO);
     LogClassSelector(entity, @"initWithApplicationSceneHandle:", NO);
     LogClassSelector(appController, @"sharedInstance", YES);
@@ -377,31 +370,41 @@ static void LogHostingAPI(void)
         CLog(@"api: displayIdentity=%@", displayIdentity ? NSStringFromClass([displayIdentity class]) : @"nil");
     }
     
-    LogSelectors(manager, @[@"scene", @"identity"]);
+    NSArray<NSString *> *keywords = @[@"scene", @"identity"];
+    LogSelectors(manager, keywords);
     Class mainManager = NSClassFromString(@"SBMainDisplaySceneManager");
     if (mainManager && mainManager != manager) {
-        LogSelectors(mainManager, @[@"scene", @"identity"]);
+        LogSelectors(mainManager, keywords);
     }
+    // Dump all SBAppViewController methods containing 'invalid' or 'tear' or 'dealloc'
+    // to find the correct selector for explicit invalidation.
     LogSelectors(controller, @[@"invalid", @"tear", @"dealloc", @"destroy", @"cleanup"]);
-    LogSelectors(NSClassFromString(@"SBApplication"), @[@"scene", @"identity"]);
+    LogSelectors(NSClassFromString(@"SBApplication"), keywords);
 }
 
 static id CarDisplay(void)
 {
     Class deviceClass = NSClassFromString(@"AVExternalDevice");
     id device = CallClass0(deviceClass, @"currentCarPlayExternalDevice");
-    if (!device) return nil;
+    if (!device) {
+        return nil;
+    }
     
     NSArray *screenIDs = Call0(device, @"screenIDs");
     NSString *uniqueID = [screenIDs isKindOfClass:[NSArray class]] && screenIDs.count ? screenIDs[0] : nil;
-    if (![uniqueID isKindOfClass:[NSString class]]) return nil;
+    if (![uniqueID isKindOfClass:[NSString class]]) {
+        return nil;
+    }
     
     Class displayClass = NSClassFromString(@"CADisplay");
     NSArray *displays = CallClass0(displayClass, @"displays");
     for (id display in displays) {
         NSString *candidate = Call0(display, @"uniqueId");
-        if ([candidate isEqualToString:uniqueID]) return display;
+        if ([candidate isEqualToString:uniqueID]) {
+            return display;
+        }
     }
+    
     return nil;
 }
 
@@ -451,6 +454,19 @@ static void DumpProbe(void)
              screen.scale,
              BoolReturn(screen, @"_isCarScreen", NO),
              BoolReturn(screen, @"_isCarPlayScreen", NO));
+        
+        id display = Call0(screen, @"display");
+        if (display) {
+            CLog(@"  display=%@ uniqueId=%@", NSStringFromClass([display class]), Call0(display, @"uniqueId"));
+        }
+    }
+    
+    CLog(@"--- probe: UIScreen scenes ---");
+    for (UIScreen *screen in [UIScreen screens]) {
+        id scene = Call0(screen, @"_scene");
+        if (scene) {
+            CLog(@"  screenScene %@ role=%@", NSStringFromClass([scene class]), Call0(scene, @"role"));
+        }
     }
     
     CLog(@"--- probe: app scenes ---");
@@ -459,34 +475,115 @@ static void DumpProbe(void)
     if ([scenes isKindOfClass:[NSSet class]]) {
         for (UIScene *scene in scenes) {
             CLog(@"  scene %@ state=%ld", NSStringFromClass([scene class]), (long)scene.activationState);
+            if ([scene isKindOfClass:[UIWindowScene class]]) {
+                for (UIWindow *window in [(UIWindowScene *)scene windows]) {
+                    CLog(@"    window %@ frame=%@ level=%.0f hidden=%d root=%@",
+                         NSStringFromClass([window class]),
+                         NSStringFromCGRect(window.frame),
+                         window.windowLevel,
+                         window.hidden,
+                         NSStringFromClass([[window rootViewController] class]));
+                }
+            }
+        }
+    } else {
+        CLog(@"  connectedScenes unavailable (%@)", NSStringFromClass([scenes class]));
+    }
+}
+
+#pragma mark - Hosting
+
+// Forward-declared so ApplyModeWhenReady can check it.
+static BOOL gUserClosed = NO;
+
+static BOOL SetObjectIvar(id object, NSString *name, id value)
+{
+    Ivar ivar = object ? class_getInstanceVariable([object class], name.UTF8String) : NULL;
+    if (!ivar) {
+        return NO;
+    }
+    const char *type = ivar_getTypeEncoding(ivar);
+    if (!type || type[0] != '@') {
+        // Never poke a primitive ivar with an object pointer.
+        return NO;
+    }
+    object_setIvar(object, ivar, value);
+    return YES;
+}
+
+
+static BOOL SetCurrentMode(id viewController, NSInteger mode)
+{
+    if (!viewController) {
+        return NO;
+    }
+    if ([viewController respondsToSelector:NSSelectorFromString(@"_setCurrentMode:")]) {
+        CallInteger(viewController, @"_setCurrentMode:", mode);
+        return YES;
+    }
+    @try {
+        [viewController setValue:@(mode) forKey:@"currentMode"];
+        return YES;
+    } @catch (NSException *exception) {
+        CLog(@"mode: KVC failed: %@", exception.reason);
+    }
+    return SetObjectIvar(viewController, @"_currentMode", @(mode));
+}
+
+// Live mode is what drives the hosted scene's foreground state. Switching into
+// it before the scene update transaction has brought the app up makes
+// SpringBoard's scene controller believe the foreground flag changed behind its
+// back, and it raises NSInternalInconsistencyException. So in auto mode we wait
+// for the process to exist and only then go live.
+// We also stop polling once the user closes the overlay, because the hosted
+// scene goes background at that point and re-applying Live mode causes the
+// same assertion.
+static void ApplyModeWhenReady(id viewController, id application, NSInteger mode, int attempt)
+{
+    if (!viewController || gUserClosed) {
+        return;
+    }
+    
+    BOOL running = BoolReturn(application, @"isRunning", NO);
+    CLog(@"mode: poll attempt=%d running=%d", attempt, running);
+    
+    if (running) {
+        @try {
+            BOOL ok = SetCurrentMode(viewController, 2);
+            CLog(@"mode: live applied=%d", ok);
+        } @catch (NSException *e) {
+            CLog(@"mode: live threw %@: %@", e.name, e.reason);
+        }
+        return;
+    }
+    
+    if (attempt < 15) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+            ApplyModeWhenReady(viewController, application, mode, attempt + 1);
+        });
+    } else {
+        // App never started after 30s. Switch back to background mode to
+        // avoid leaving the scene in Live while the process is gone —
+        // that causes NSInternalInconsistencyException when the system
+        // or another tweak (e.g. CarBridge) touches the foreground flag.
+        CLog(@"mode: app never started after 30s, reverting to background");
+        @try {
+            SetCurrentMode(viewController, 0);
+            CLog(@"mode: reverted to 0 (background) to avoid stale Live");
+        } @catch (NSException *e) {
+            CLog(@"mode: revert threw %@: %@", e.name, e.reason);
         }
     }
 }
 
-#pragma mark - Host slot
-
-// Each hosted app is tracked in a HostSlot.
-@interface HostSlot : NSObject
-@property (copy) NSString *bundleID;
-@property (strong) UIView *container;   // blue pane that holds the app view
-@property (strong) UILabel *label;
-@property id viewController;            // SBAppViewController
-@property id application;               // SBApplication
-@property id handle;                    // SBDeviceApplicationSceneHandle
-@end
-
-@implementation HostSlot
-@end
-
-static HostSlot *gSlots[2];
-static BOOL gUserClosed = NO;
-static BOOL gHidden = NO;  // hidden via lilliana.cockpit.hide marker
-// gCrashCount declared earlier, before CockpitExceptionHandler.
-
-// SetCurrentMode and ApplyModeWhenReady removed in 0.0.21 — we no longer
-// set Mode 2 on the SBAppViewController, which was the root cause of the
-// "foreground status changed out from underneath us" crash.
-
+// Mirrors the sequence in carplay-cast: the transaction must be tracked in
+// _activeTransitions and begun before _createSceneViewController, and the
+// scene view wants displayMode 4 afterwards. Skipping these leaves the view
+// controller in a half-committed state that SpringBoard eventually trips over.
+//
+// The scene update transaction with deliveringActions:YES is what actually
+// tells SpringBoard to bring the app process up. Without it the scene handle
+// exists but the app is never launched.
 static void ConfigureAppViewController(id viewController, id entity, id application)
 {
     SEL ignoresSel = NSSelectorFromString(@"setIgnoresOcclusions:");
@@ -494,21 +591,21 @@ static void ConfigureAppViewController(id viewController, id entity, id applicat
         ((void (*)(id, SEL, BOOL))objc_msgSend)(viewController, ignoresSel, YES);
     }
     
-    // Do NOT set Mode 2 here. Setting Mode 2 (Live/foreground) causes
-    // NSInternalInconsistencyException when another app is launched on the
-    // phone — SpringBoard changes the scene's foreground status to NO, but
-    // the SBAppViewController still thinks it's Live. CarBridge also
-    // manipulates scene state, compounding the conflict.
-    // Instead, rely on setIgnoresOcclusions:YES + the scene update
-    // transaction with deliveringActions:YES to bring the app up, and let
-    // SpringBoard manage the foreground/background lifecycle naturally.
-    // The displayMode 4 (LiveContent) on the scene view is what makes the
-    // app's content visible even without explicit Mode 2.
-    CLog(@"host: skipping Mode 2 (let SpringBoard manage foreground)");
+    // Set mode 2 (foreground/active) immediately. This is what actually tells
+    // SpringBoard to launch the app process — without it the scene handle is
+    // created but the app never starts (isRunning stays NO forever).
+    // The crash this previously caused (NSInternalInconsistencyException when
+    // the user closes the overlay) is now handled by switching mode back to 0
+    // in closeTapped before hiding the window.
+    SetCurrentMode(viewController, 2);
+    CLog(@"host: currentMode set to 2 (foreground)");
     
     id activationSettings = Call0(viewController, @"_activationSettings");
+    CLog(@"host: activationSettings=%@",
+         activationSettings ? NSStringFromClass([activationSettings class]) : @"(nil)");
     if (activationSettings) {
         Call0(activationSettings, @"clearActivationSettings");
+        CLog(@"host: activation settings cleared");
     }
     
     SEL transactionSel = NSSelectorFromString(@"_createSceneUpdateTransactionForApplicationSceneEntity:deliveringActions:");
@@ -516,11 +613,18 @@ static void ConfigureAppViewController(id viewController, id entity, id applicat
         id transaction = ((id (*)(id, SEL, id, BOOL))objc_msgSend)(viewController, transactionSel, entity, YES);
         if (transaction) {
             id transitions = Call0(viewController, @"_activeTransitions");
+            BOOL tracked = NO;
             if ([transitions respondsToSelector:@selector(addObject:)]) {
                 ((void (*)(id, SEL, id))objc_msgSend)(transitions, @selector(addObject:), transaction);
+                tracked = YES;
             }
             Call0(transaction, @"begin");
-            CLog(@"host: transaction begun tracked=%d", transitions != nil);
+            CLog(@"host: transaction=%@ tracked=%d transitions=%@",
+                 NSStringFromClass([transaction class]),
+                 tracked,
+                 transitions ? NSStringFromClass([transitions class]) : @"(nil)");
+        } else {
+            CLog(@"host: no scene update transaction");
         }
     }
     
@@ -532,62 +636,62 @@ static void ConfigureAppViewController(id viewController, id entity, id applicat
         id factory = CallClass0(NSClassFromString(@"SBApplicationSceneView"), @"defaultDisplayModeAnimationFactory");
         if ([sceneView respondsToSelector:displaySel]) {
             ((void (*)(id, SEL, NSInteger, id, id))objc_msgSend)(sceneView, displaySel, (NSInteger)4, factory, nil);
-            CLog(@"host: displayMode 4 applied");
+            CLog(@"host: displayMode 4 applied (factory=%@)",
+                 factory ? NSStringFromClass([factory class]) : @"(nil)");
         }
-    }
-}
-
-static void ScaleAppViewIntoContainer(UIView *appView, UIView *container)
-{
-    CGSize phone = [UIScreen mainScreen].bounds.size;
-    appView.backgroundColor = [UIColor clearColor];
-    appView.autoresizingMask = UIViewAutoresizingNone;
-    [container addSubview:appView];
-    appView.frame = CGRectMake(0, 0, phone.width, phone.height);
-    [appView layoutIfNeeded];
-    
-    // Scale the scene content to fit the container.
-    id deviceController = nil;
-    @try { deviceController = [appView.nextResponder valueForKey:@"_deviceAppViewController"]; } @catch (...) {}
-    // Try via the view controller if nextResponder didn't work
-    if (!deviceController) {
-        // Walk up to find the view controller, then access _deviceAppViewController
-        id responder = appView.nextResponder;
-        while (responder && ![responder isKindOfClass:[UIViewController class]]) {
-            responder = Call0(responder, @"nextResponder");
-        }
-        if (responder) {
-            @try { deviceController = [responder valueForKey:@"_deviceAppViewController"]; } @catch (...) {}
-        }
-    }
-    
-    id sceneView = nil;
-    @try { sceneView = [deviceController valueForKey:@"_sceneView"]; } @catch (...) {}
-    
-    UIView *contentView = nil;
-    @try { contentView = [sceneView valueForKey:@"_sceneContentContainerView"]; } @catch (...) {}
-    
-    if (contentView) {
-        CGFloat scaleX = container.bounds.size.width / MAX(phone.width, 1);
-        CGFloat scaleY = container.bounds.size.height / MAX(phone.height, 1);
-        CGFloat scale = MIN(scaleX, scaleY);
-        contentView.transform = CGAffineTransformMakeScale(scale, scale);
-        contentView.center = CGPointMake(container.bounds.size.width / 2.0,
-                                         container.bounds.size.height / 2.0);
-        CLog(@"host: scaled %.3f pane=%@ phone=%@",
-             scale, NSStringFromCGSize(container.bounds.size), NSStringFromCGSize(phone));
     } else {
-        CLog(@"host: content view not reachable, showing unscaled");
+        CLog(@"host: no scene view for display mode");
     }
 }
 
-static HostSlot *HostApplication(NSString *bundleID, UIView *container)
+static void LogHostedState(id application, id handle, UIView *appView, UIView *sceneView)
 {
-    if (bundleID.length == 0) return nil;
+    CLog(@"host: state running=%d", BoolReturn(application, @"isRunning", NO));
     
-    HostSlot *slot = [HostSlot new];
-    slot.bundleID = bundleID;
-    slot.container = container;
+    id scene = Call0(handle, @"sceneIfExists");
+    CLog(@"host: state scene=%@ active=%d",
+         scene ? NSStringFromClass([scene class]) : @"(nil)",
+         BoolReturn(scene, @"isActive", NO));
+    
+    CLog(@"host: state view frame=%@ hidden=%d alpha=%.2f window=%@",
+         NSStringFromCGRect(appView.frame),
+         appView.hidden,
+         appView.alpha,
+         NSStringFromClass([appView.window class]));
+    
+    for (UIView *subview in appView.subviews) {
+        CLog(@"host: state sub %@ frame=%@ hidden=%d alpha=%.2f",
+             NSStringFromClass([subview class]),
+             NSStringFromCGRect(subview.frame),
+             subview.hidden,
+             subview.alpha);
+    }
+    
+    if (sceneView) {
+        CLog(@"host: state sceneView frame=%@ transform=%@",
+             NSStringFromCGRect([(UIView *)sceneView frame]),
+             NSStringFromCGAffineTransform([(UIView *)sceneView transform]));
+    }
+}
+
+// In SpringBoard's process the external launch helpers (SBSLaunch*, 
+// LSApplicationWorkspace) don't work. SBApplicationController on iOS 16
+// has no activate/launch selectors either. The scene update transaction
+// with deliveringActions:YES in ConfigureAppViewController is the only
+// mechanism that actually pulls the app process up.
+static BOOL LaunchApplication(id application)
+{
+    // No-op: the transaction in ConfigureAppViewController handles this.
+    // This function is kept for logging/diagnostics only.
+    CLog(@"launch: relying on scene transaction to start app");
+    return NO;
+}
+
+static id HostApplication(NSString *bundleID, UIView *container)
+{
+    if (bundleID.length == 0) {
+        return nil;
+    }
     
     Class appControllerClass = NSClassFromString(@"SBApplicationController");
     id appController = CallClass0(appControllerClass, @"sharedInstance");
@@ -596,11 +700,18 @@ static HostSlot *HostApplication(NSString *bundleID, UIView *container)
         CLog(@"host: %@ is not installed", bundleID);
         return nil;
     }
-    slot.application = application;
-    CLog(@"host: %@ application=%@", bundleID, NSStringFromClass([application class]));
+    CLog(@"host: application=%@", NSStringFromClass([application class]));
     
+    // Try to activate the app from inside SpringBoard. The scene transaction
+    // below may also pull the process up on its own.
     BOOL alreadyRunning = BoolReturn(application, @"isRunning", NO);
-    CLog(@"host: %@ running=%d", bundleID, alreadyRunning);
+    if (!alreadyRunning) {
+        CLog(@"host: %@ not running, activating…", bundleID);
+        BOOL launched = LaunchApplication(application);
+        CLog(@"host: launch result=%d", launched);
+    } else {
+        CLog(@"host: %@ already running", bundleID);
+    }
     
     id sceneManager = CallClass0(NSClassFromString(@"SBSceneManagerCoordinator"), @"mainDisplaySceneManager");
     if (!sceneManager) {
@@ -610,19 +721,45 @@ static HostSlot *HostApplication(NSString *bundleID, UIView *container)
     
     id sceneIdentity = nil;
     if ([[NSFileManager defaultManager] fileExistsAtPath:@COCKPIT_NEWSCENE]) {
+        CLog(@"host: newscene marker present, requesting a separate scene");
         sceneIdentity = Call1(sceneManager, @"newSceneIdentityForApplication:", application);
-        CLog(@"host: %@ newSceneIdentity=%@", bundleID, sceneIdentity ?: @"(nil)");
+        CLog(@"host: newSceneIdentityForApplication: = %@",
+             sceneIdentity ? sceneIdentity : @"(nil)");
     }
     
     SEL identitySel = NSSelectorFromString(@"_sceneIdentityForApplication:createPrimaryIfRequired:");
     if ([sceneManager respondsToSelector:identitySel]) {
         sceneIdentity = ((id (*)(id, SEL, id, BOOL))objc_msgSend)(sceneManager, identitySel, application, YES);
+        CLog(@"host: identity via _sceneIdentityForApplication:createPrimaryIfRequired: = %@",
+             sceneIdentity ? NSStringFromClass([sceneIdentity class]) : @"nil");
     }
-    if (!sceneIdentity) sceneIdentity = Call1(sceneManager, @"sceneIdentityForApplication:", application);
-    if (!sceneIdentity) sceneIdentity = Call1(sceneManager, @"_sceneIdentityForApplication:", application);
-    if (!sceneIdentity) sceneIdentity = Call0(application, @"primarySceneIdentity");
-    if (!sceneIdentity) sceneIdentity = Call0(application, @"sceneIdentity");
-    CLog(@"host: %@ sceneIdentity=%@", bundleID, sceneIdentity ?: @"(nil)");
+    if (!sceneIdentity) {
+        sceneIdentity = Call1(sceneManager, @"sceneIdentityForApplication:", application);
+        if (sceneIdentity) {
+            CLog(@"host: identity via sceneIdentityForApplication: = %@", NSStringFromClass([sceneIdentity class]));
+        }
+    }
+    if (!sceneIdentity) {
+        sceneIdentity = Call1(sceneManager, @"_sceneIdentityForApplication:", application);
+        if (sceneIdentity) {
+            CLog(@"host: identity via _sceneIdentityForApplication: = %@", NSStringFromClass([sceneIdentity class]));
+        }
+    }
+    if (!sceneIdentity) {
+        sceneIdentity = Call0(application, @"primarySceneIdentity");
+        if (sceneIdentity) {
+            CLog(@"host: identity via application.primarySceneIdentity = %@", NSStringFromClass([sceneIdentity class]));
+        }
+    }
+    if (!sceneIdentity) {
+        sceneIdentity = Call0(application, @"sceneIdentity");
+        if (sceneIdentity) {
+            CLog(@"host: identity via application.sceneIdentity = %@", NSStringFromClass([sceneIdentity class]));
+        }
+    }
+    CLog(@"host: sceneIdentity=%@ class=%@",
+         sceneIdentity ?: @"(nil)",
+         sceneIdentity ? NSStringFromClass([sceneIdentity class]) : @"(nil)");
     
     id displayIdentity = Call0(sceneManager, @"displayIdentity");
     
@@ -631,25 +768,25 @@ static HostSlot *HostApplication(NSString *bundleID, UIView *container)
     @try {
         request = CallClass2(requestClass, @"defaultRequestForApplication:sceneIdentity:displayIdentity:", application, sceneIdentity, displayIdentity);
     } @catch (NSException *exception) {
-        CLog(@"host: %@ request threw %@", bundleID, exception.reason);
+        CLog(@"host: request threw %@: %@", exception.name, exception.reason);
     }
     if (!request) {
-        CLog(@"host: %@ no scene handle request", bundleID);
+        CLog(@"host: no scene handle request");
         return nil;
     }
+    CLog(@"host: request=%@", NSStringFromClass([request class]));
     
     id handle = Call1(sceneManager, @"fetchOrCreateApplicationSceneHandleForRequest:", request);
     if (!handle) {
-        CLog(@"host: %@ no scene handle", bundleID);
+        CLog(@"host: no scene handle");
         return nil;
     }
-    slot.handle = handle;
-    CLog(@"host: %@ handle=%@", bundleID, NSStringFromClass([handle class]));
+    CLog(@"host: handle=%@", NSStringFromClass([handle class]));
     
     Class entityClass = NSClassFromString(@"SBDeviceApplicationSceneEntity");
     id entity = Call1([entityClass alloc], @"initWithApplicationSceneHandle:", handle);
     if (!entity) {
-        CLog(@"host: %@ no scene entity", bundleID);
+        CLog(@"host: no scene entity");
         return nil;
     }
     
@@ -657,91 +794,98 @@ static HostSlot *HostApplication(NSString *bundleID, UIView *container)
     id viewController = Call2([vcClass alloc], @"initWithIdentifier:andApplicationSceneEntity:", bundleID, entity);
     if (!viewController) {
         viewController = Call1([vcClass alloc], @"initWithApplicationSceneEntity:", entity);
+        if (viewController) {
+            CLog(@"host: used initWithApplicationSceneEntity: fallback");
+        }
     }
     if (!viewController) {
-        CLog(@"host: %@ no app view controller", bundleID);
+        CLog(@"host: no app view controller");
         return nil;
     }
-    slot.viewController = viewController;
     
     ConfigureAppViewController(viewController, entity, application);
     
-    // No mode polling — we don't set Mode 2 anymore, so there's nothing
-    // to re-apply or downgrade. The scene transaction handles app launch.
+    // Always poll for the app becoming running and re-apply mode 2.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        ApplyModeWhenReady(viewController, application, -1, 1);
+    });
     
     UIView *appView = Call0(viewController, @"view");
     if (!appView) {
-        CLog(@"host: %@ controller has no view", bundleID);
+        CLog(@"host: controller has no view");
         return nil;
     }
     
-    ScaleAppViewIntoContainer(appView, container);
+    CGSize phone = [UIScreen mainScreen].bounds.size;
+    appView.backgroundColor = [UIColor clearColor];
+    appView.autoresizingMask = UIViewAutoresizingNone;
+    [container addSubview:appView];
+    appView.frame = CGRectMake(0, 0, phone.width, phone.height);
+    [appView layoutIfNeeded];
+    CLog(@"host: view=%@ frame=%@ subviews=%lu",
+         NSStringFromClass([appView class]),
+         NSStringFromCGRect(appView.frame),
+         (unsigned long)appView.subviews.count);
+    
+    // The scene lays out at phone size. Scale the content container down and
+    // centre it in the pane instead of squeezing it into the pane's bounds,
+    // otherwise the app re-lays out at half width and then gets shrunk again.
+    id deviceController = nil;
+    @try {
+        deviceController = [viewController valueForKey:@"_deviceAppViewController"];
+    } @catch (NSException *exception) {
+        CLog(@"host: no device controller: %@", exception.reason);
+    }
+    
+    id sceneView = nil;
+    @try {
+        sceneView = [deviceController valueForKey:@"_sceneView"];
+    } @catch (NSException *exception) {
+        CLog(@"host: no scene view: %@", exception.reason);
+    }
+    
+    UIView *contentView = nil;
+    @try {
+        contentView = [sceneView valueForKey:@"_sceneContentContainerView"];
+    } @catch (NSException *exception) {
+        CLog(@"host: no content view: %@", exception.reason);
+    }
+    
+    if (contentView) {
+        CGFloat scaleX = container.bounds.size.width / MAX(phone.width, 1);
+        CGFloat scaleY = container.bounds.size.height / MAX(phone.height, 1);
+        CGFloat scale = MIN(scaleX, scaleY);
+        contentView.transform = CGAffineTransformMakeScale(scale, scale);
+        contentView.center = CGPointMake(container.bounds.size.width / 2.0,
+                                         container.bounds.size.height / 2.0);
+        CLog(@"host: scaled %.3f (x=%.3f y=%.3f) pane=%@ phone=%@",
+             scale, scaleX, scaleY, NSStringFromCGSize(container.bounds.size), NSStringFromCGSize(phone));
+        CLog(@"host: sceneView frame=%@ content frame=%@ center=%@",
+             NSStringFromCGRect([(UIView *)sceneView frame]),
+             NSStringFromCGRect(contentView.frame),
+             NSStringFromCGPoint(contentView.center));
+    } else {
+        CLog(@"host: scene content view not reachable, showing unscaled");
+    }
     
     CLog(@"host: %@ attached", bundleID);
     
-    // Log state after a delay.
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-        CLog(@"host: %@ state running=%d", bundleID, BoolReturn(application, @"isRunning", NO));
-        id scene = Call0(handle, @"sceneIfExists");
-        CLog(@"host: %@ scene=%@ active=%d",
-             bundleID,
-             scene ? NSStringFromClass([scene class]) : @"(nil)",
-             BoolReturn(scene, @"isActive", NO));
+        LogHostedState(application, handle, appView, sceneView);
     });
     
-    return slot;
-}
-
-static void TeardownSlot(HostSlot *slot)
-{
-    if (!slot || !slot.viewController) return;
-    
-    // No mode reset — we never set Mode 2, so no need to revert.
-    // Just invalidate the view controller.
-    NSArray<NSString *> *invalSels = @[
-        @"invalidate",
-        @"_invalidate",
-        @"_invalidateForReason:",
-        @"_tearDown",
-    ];
-    for (NSString *selName in invalSels) {
-        SEL sel = NSSelectorFromString(selName);
-        if (![slot.viewController respondsToSelector:sel]) continue;
-        @try {
-            if ([selName containsString:@":"]) {
-                ((void (*)(id, SEL, NSInteger))objc_msgSend)(slot.viewController, sel, 0);
-            } else {
-                ((void (*)(id, SEL))objc_msgSend)(slot.viewController, sel);
-            }
-            CLog(@"teardown[%@]: called %@", slot.bundleID, selName);
-            break;
-        } @catch (NSException *e) {
-            CLog(@"teardown[%@]: %@ threw %@", slot.bundleID, selName, e.reason);
-        }
-    }
-    
-    slot.viewController = nil;
-    slot.application = nil;
-    slot.handle = nil;
-}
-
-static void TeardownAllHosts(void)
-{
-    for (int i = 0; i < 2; i++) {
-        if (gSlots[i]) {
-            TeardownSlot(gSlots[i]);
-            gSlots[i] = nil;
-        }
-    }
-    gUserClosed = NO;
+    return viewController;
 }
 
 #pragma mark - UI
 
 static UIWindow *gWindow;
 static UIWindow *gCloseWindow;
-static UIView *gPanes[2];
+static UIView *gLeftPane;
 static UIView *gDivider;
+static UILabel *gLabel;
+static UIButton *gCloseButton;
+static id gHostController;
 static BOOL gTestMode;
 
 @interface CockpitControl : NSObject
@@ -754,12 +898,23 @@ static BOOL gTestMode;
 {
     gUserClosed = YES;
     
-    // Just hide the window — no mode changes. Since we never set Mode 2,
-    // there's no need to revert to Mode 0. Hiding the window is enough
-    // to make the overlay disappear without triggering scene state assertions.
+    // Before hiding the overlay, switch the hosted scene back to background
+    // mode. If we leave it in Live (foreground) and just hide the window,
+    // SpringBoard detects that the scene's foreground status changed
+    // behind its back and crashes with NSInternalInconsistencyException.
+    if (gHostController) {
+        @try {
+            CallInteger(gHostController, @"_setCurrentMode:", 0);
+            CLog(@"ui: mode set to 0 (background) before hiding");
+        } @catch (NSException *e) {
+            CLog(@"ui: mode reset threw %@: %@", e.name, e.reason);
+        }
+    }
+    
     gWindow.hidden = YES;
+    // The close button lives in its own window so a hosted app cannot cover it.
     gCloseWindow.hidden = YES;
-    CLog(@"ui: overlay hidden by user");
+    CLog(@"ui: overlay hidden by the user (respring to bring it back)");
 }
 
 @end
@@ -768,34 +923,34 @@ static CockpitControl *gControl;
 
 static void Layout(void)
 {
-    if (!gWindow) return;
+    if (!gWindow) {
+        return;
+    }
     
     CGRect bounds = gWindow.bounds;
     
     if (gTestMode) {
-        // Test mode: single pane fills the window.
-        if (gPanes[0]) gPanes[0].frame = bounds;
+        // The window is already only the left half of the phone screen.
+        gLeftPane.frame = bounds;
         gDivider.frame = CGRectMake(bounds.size.width - 2, 0, 2, bounds.size.height);
     } else {
-        // CarPlay: left margin for sidebar, then 60/40 split.
+        // CarPlay screen. Leave a left margin for the CarPlay sidebar
+        // (approx 1/13 of screen width) then split the remaining area.
         CGFloat sideMargin = floor(bounds.size.width / 13.0);
         CGFloat usable = bounds.size.width - sideMargin;
-        CGFloat leftWidth = floor(usable * kSplitRatio);
-        
-        if (gPanes[0]) {
-            gPanes[0].frame = CGRectMake(sideMargin, 0, leftWidth, bounds.size.height);
-        }
-        if (gPanes[1]) {
-            gPanes[1].frame = CGRectMake(sideMargin + leftWidth, 0,
-                                         usable - leftWidth, bounds.size.height);
-        }
-        gDivider.frame = CGRectMake(sideMargin + leftWidth, 0, 2, bounds.size.height);
+        CGFloat ratio = PrefFloat(kPrefsRatio, 0.5);
+        ratio = MAX(0.25, MIN(0.75, ratio));
+        CGFloat split = floor(usable * ratio);
+        gLeftPane.frame = CGRectMake(sideMargin, 0, split, bounds.size.height);
+        gDivider.frame = CGRectMake(sideMargin + split, 0, 2, bounds.size.height);
     }
     
-    // Position close button at top-right of left pane.
-    if (gCloseWindow && gPanes[0]) {
-        CGFloat paneWidth = gPanes[0].bounds.size.width;
-        CGFloat paneX = gPanes[0].frame.origin.x;
+    gLabel.frame = gLeftPane.bounds;
+    
+    if (gCloseWindow) {
+        CGFloat paneWidth = gLeftPane.bounds.size.width;
+        CGFloat paneX = gLeftPane.frame.origin.x;
+        gCloseButton.frame = CGRectMake(0, 0, 48, 48);
         gCloseWindow.frame = CGRectMake(paneX + paneWidth - 60, 12, 48, 48);
         gCloseWindow.hidden = gUserClosed;
     }
@@ -804,7 +959,9 @@ static void Layout(void)
 static UIWindow *MakeTestWindow(void)
 {
     CGRect screen = [UIScreen mainScreen].bounds;
-    CGRect frame = CGRectMake(0, 0, floor(screen.size.width * 0.5), screen.size.height);
+    CGFloat ratio = PrefFloat(kPrefsRatio, 0.5);
+    ratio = MAX(0.25, MIN(0.75, ratio));
+    CGRect frame = CGRectMake(0, 0, floor(screen.size.width * ratio), screen.size.height);
     
     UIWindow *window = nil;
     for (UIScene *scene in [[UIApplication sharedApplication] connectedScenes]) {
@@ -818,60 +975,110 @@ static UIWindow *MakeTestWindow(void)
     }
     window.frame = frame;
     
-    CLog(@"test window: class=%@ frame=%@", NSStringFromClass([window class]), NSStringFromCGRect(frame));
+    CLog(@"test window: class=%@ frame=%@ screen=%@", NSStringFromClass([window class]), NSStringFromCGRect(frame), NSStringFromCGRect(screen));
     return window;
 }
 
-static UIView *MakePane(NSString *title, UIColor *bgColor)
+static void TeardownHost(void)
 {
-    UIView *pane = [[UIView alloc] initWithFrame:CGRectZero];
-    pane.backgroundColor = bgColor;
-    pane.userInteractionEnabled = YES;
-    pane.clipsToBounds = YES;
-    
-    UILabel *label = [[UILabel alloc] initWithFrame:CGRectZero];
-    label.text = title;
-    label.numberOfLines = 0;
-    label.textAlignment = NSTextAlignmentCenter;
-    label.textColor = [UIColor whiteColor];
-    label.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
-    label.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    [pane addSubview:label];
-    
-    return pane;
+    // Properly invalidate the AppViewController before its window goes away.
+    // Without invalidation, SpringBoard raises:
+    //   'AppViewController must be explicitly invalidated before it can deallocate'
+    // The selector name varies by iOS version — try several candidates.
+    if (gHostController) {
+        @try {
+            CallInteger(gHostController, @"_setCurrentMode:", 0);
+            CLog(@"teardown: mode set to 0");
+        } @catch (NSException *e) {
+            CLog(@"teardown: mode reset threw %@: %@", e.name, e.reason);
+        }
+        // Try known invalidation selectors in order of likelihood.
+        // SBAppViewController on iOS 16 uses _invalidateForReason: (passing 0)
+        // or _invalidate; on some versions it's _tearDown.
+        NSArray<NSString *> *invalSels = @[
+            @"_invalidateForReason:",
+            @"_invalidate",
+            @"invalidate",
+            @"_tearDown",
+            @"_invalidateForReason:isCrash:",
+        ];
+        BOOL invalidated = NO;
+        for (NSString *selName in invalSels) {
+            SEL sel = NSSelectorFromString(selName);
+            if (![gHostController respondsToSelector:sel]) continue;
+            @try {
+                if ([selName containsString:@":"]) {
+                    // Selector takes an argument — pass 0 (NoReason).
+                    ((void (*)(id, SEL, NSInteger))objc_msgSend)(gHostController, sel, 0);
+                } else {
+                    ((void (*)(id, SEL))objc_msgSend)(gHostController, sel);
+                }
+                CLog(@"teardown: called %@ successfully", selName);
+                invalidated = YES;
+                break;
+            } @catch (NSException *e) {
+                CLog(@"teardown: %@ threw %@: %@", selName, e.name, e.reason);
+            }
+        }
+        if (!invalidated) {
+            CLog(@"teardown: no invalidation selector found, attempting KVC");
+            @try {
+                [gHostController setValue:@YES forKey:@"invalidated"];
+                CLog(@"teardown: KVC invalidated=YES succeeded");
+                invalidated = YES;
+            } @catch (NSException *e) {
+                CLog(@"teardown: KVC invalidated failed: %@", e.reason);
+            }
+        }
+        gHostController = nil;
+    }
+    gUserClosed = NO;
 }
 
 static void CreateInterface(BOOL testMode)
 {
     UIWindow *window = testMode ? MakeTestWindow() : MakeCarWindow();
-    if (!window) return;
+    if (!window) {
+        return;
+    }
     
     gTestMode = testMode;
     window.windowLevel = 9000000;
     window.backgroundColor = [UIColor clearColor];
     window.hidden = NO;
     
-    // Create two panes with blue translucent background.
-    UIColor *paneColor = [UIColor colorWithRed:0.05 green:0.20 blue:0.55 alpha:0.55];
-    gPanes[0] = MakePane(@"Cockpit 探针\n左屏", paneColor);
-    gPanes[1] = MakePane(@"Cockpit 探针\n右屏", paneColor);
-    [window addSubview:gPanes[0]];
-    [window addSubview:gPanes[1]];
+    UIView *left = [[UIView alloc] initWithFrame:CGRectZero];
+    left.backgroundColor = [UIColor colorWithRed:0.05 green:0.20 blue:0.55 alpha:0.55];
+    left.userInteractionEnabled = YES;
+    left.clipsToBounds = YES;
+    [window addSubview:left];
     
-    gDivider = [[UIView alloc] initWithFrame:CGRectZero];
-    gDivider.backgroundColor = [UIColor whiteColor];
-    [window addSubview:gDivider];
+    UILabel *label = [[UILabel alloc] initWithFrame:CGRectZero];
+    label.text = testMode ? @"Cockpit 探针\n手机屏测试" : @"Cockpit 探针\n车机分屏";
+    label.numberOfLines = 0;
+    label.textAlignment = NSTextAlignmentCenter;
+    label.textColor = [UIColor whiteColor];
+    label.font = [UIFont systemFontOfSize:22 weight:UIFontWeightSemibold];
+    label.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [left addSubview:label];
     
-    // Close button in separate window.
+    UIView *divider = [[UIView alloc] initWithFrame:CGRectZero];
+    divider.backgroundColor = [UIColor whiteColor];
+    [window addSubview:divider];
+    
     UIButton *close = [UIButton buttonWithType:UIButtonTypeSystem];
     [close setTitle:@"✕" forState:UIControlStateNormal];
     [close setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     close.titleLabel.font = [UIFont systemFontOfSize:28 weight:UIFontWeightBold];
     close.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.35];
     close.layer.cornerRadius = 24;
-    if (!gControl) gControl = [CockpitControl new];
+    if (!gControl) {
+        gControl = [CockpitControl new];
+    }
     [close addTarget:gControl action:@selector(closeTapped) forControlEvents:UIControlEventTouchUpInside];
     
+    // A tiny separate window keeps the close button above any hosted app and
+    // only steals touches inside its own 48x48 area.
     UIWindow *closeWindow = nil;
     if (testMode) {
         for (UIScene *scene in [[UIApplication sharedApplication] connectedScenes]) {
@@ -883,55 +1090,50 @@ static void CreateInterface(BOOL testMode)
         if (!closeWindow) {
             closeWindow = [[UIWindow alloc] initWithFrame:CGRectMake(0, 0, 48, 48)];
         }
-    } else {
-        // On CarPlay, create close window on the same window scene as the main window.
-        id windowScene = Call0(window, @"windowScene");
-        if (windowScene) {
-            closeWindow = [[UIWindow alloc] initWithWindowScene:windowScene];
-        }
-        if (!closeWindow) {
-            closeWindow = [[UIWindow alloc] initWithFrame:CGRectMake(0, 0, 48, 48)];
-        }
+        closeWindow.windowLevel = 10000000;
+        closeWindow.backgroundColor = [UIColor clearColor];
+        closeWindow.hidden = YES;
+        [closeWindow addSubview:close];
     }
-    closeWindow.windowLevel = 10000000;
-    closeWindow.backgroundColor = [UIColor clearColor];
-    closeWindow.hidden = YES;
-    [closeWindow addSubview:close];
     
     gWindow = window;
     gCloseWindow = closeWindow;
+    gLeftPane = left;
+    gDivider = divider;
+    gLabel = label;
+    gCloseButton = close;
     
     Layout();
     
-    CLog(@"ui: window=%@ bounds=%@ pane0=%@ pane1=%@",
+    CLog(@"ui: window=%@ bounds=%@ pane=%@",
          NSStringFromClass([window class]),
          NSStringFromCGRect(window.bounds),
-         NSStringFromCGRect(gPanes[0].frame),
-         NSStringFromCGRect(gPanes[1].frame));
+         NSStringFromCGRect(left.frame));
     
-    NSFileManager *manager = [NSFileManager defaultManager];
-    if ([manager fileExistsAtPath:@COCKPIT_HOSTING]) {
-        [manager removeItemAtPath:@COCKPIT_HOSTING error:nil];
-    }
-    
-    BOOL hadCrash = [manager fileExistsAtPath:@COCKPIT_CRASHED];
-    if (hadCrash) {
-        CLog(@"host: crash marker from last session found, proceeding anyway");
-        [manager removeItemAtPath:@COCKPIT_CRASHED error:nil];
-    }
-    
-    if (testMode) {
-        // Test mode: only host one app in the single pane.
-        NSString *bundleID = HostBundleID1();
-        CLog(@"ui: hosting %@ in test mode", bundleID);
-        gSlots[0] = HostApplication(bundleID, gPanes[0]);
+    NSString *bundleID = HostBundleID();
+    if (bundleID.length) {
+        NSFileManager *manager = [NSFileManager defaultManager];
+        // Older builds wrote this on every attempt; drop any leftover.
+        if ([manager fileExistsAtPath:@COCKPIT_HOSTING]) {
+            [manager removeItemAtPath:@COCKPIT_HOSTING error:nil];
+        }
+        
+        if ([manager fileExistsAtPath:@COCKPIT_CRASHED]) {
+            // A crash was captured last session. In earlier versions we skipped
+            // hosting to avoid crash loops, but this meant every respring after
+            // a crash required a second respring to actually start hosting.
+            // Now we just log it and proceed — the crash fixes (teardown, mode
+            // revert) should prevent loops. The marker is still cleared.
+            CLog(@"host: crash marker from last session found, proceeding anyway");
+            [manager removeItemAtPath:@COCKPIT_CRASHED error:nil];
+            CLog(@"ui: hosting %@ in %@ mode", bundleID, testMode ? @"test" : @"car");
+            gHostController = HostApplication(bundleID, left);
+        } else {
+            CLog(@"ui: hosting %@ in %@ mode", bundleID, testMode ? @"test" : @"car");
+            gHostController = HostApplication(bundleID, left);
+        }
     } else {
-        // CarPlay mode: host two apps.
-        NSString *bid1 = HostBundleID1();
-        NSString *bid2 = HostBundleID2();
-        CLog(@"ui: hosting %@ + %@ in car mode", bid1, bid2);
-        gSlots[0] = HostApplication(bid1, gPanes[0]);
-        gSlots[1] = HostApplication(bid2, gPanes[1]);
+        CLog(@"ui: no HostBundleID set, probe only");
     }
 }
 
@@ -944,10 +1146,14 @@ static BOOL Disabled(void)
 
 static BOOL CarScreenConnected(void)
 {
+    // Check UIScreen for a CarPlay screen — this stays true even when
+    // another app (e.g. Amap) takes over the CarPlay display, whereas
+    // CarDisplay() (AVExternalDevice) may return nil in that case.
     for (UIScreen *screen in [UIScreen screens]) {
         if (BoolReturn(screen, @"_isCarScreen", NO) || BoolReturn(screen, @"_isCarPlayScreen", NO)) {
             return YES;
         }
+        // CarPlay screens are typically the second screen with different bounds.
         if (![[UIScreen mainScreen] isEqual:screen] && screen.bounds.size.width != [UIScreen mainScreen].bounds.size.width) {
             return YES;
         }
@@ -961,30 +1167,11 @@ static void Tick(void)
         BOOL carConnected = CarScreenConnected();
         BOOL testMode = (!carConnected && TestModeEnabled());
         
-        // Check hide marker for temporary hide/restore without CarPlay disconnect.
-        BOOL hideMarker = FileExists(@COCKPIT_HIDE);
-        if (hideMarker && !gHidden) {
-            gHidden = YES;
-            if (gWindow && !gWindow.hidden) {
-                gWindow.hidden = YES;
-                gCloseWindow.hidden = YES;
-                CLog(@"lifecycle: hidden via marker file");
-            }
-        } else if (!hideMarker && gHidden) {
-            gHidden = NO;
-            gUserClosed = NO;  // also clear user-closed so it can reshow
-            if (gWindow && gWindow.hidden) {
-                gWindow.hidden = NO;
-                gCloseWindow.hidden = NO;
-                CLog(@"lifecycle: restored via marker file removal");
-            }
-        }
-        
-        if (gHidden) return;
-        
         if (!carConnected && !testMode) {
             if (gWindow && !gWindow.hidden) {
-                TeardownAllHosts();
+                // CarPlay disconnected. Teardown the host properly to avoid
+                // 'AppViewController must be explicitly invalidated' crash.
+                TeardownHost();
                 gWindow.hidden = YES;
                 CLog(@"lifecycle: car display gone, window hidden");
             }
@@ -993,14 +1180,17 @@ static void Tick(void)
         
         if (gWindow) {
             if (carConnected && gTestMode) {
-                TeardownAllHosts();
+                // CarPlay came up while we were testing on the phone screen.
+                // Teardown the old host properly before rebuilding.
+                TeardownHost();
                 gWindow.hidden = YES;
                 gWindow = nil;
                 gCloseWindow.hidden = YES;
                 gCloseWindow = nil;
-                gPanes[0] = nil;
-                gPanes[1] = nil;
+                gLeftPane = nil;
                 gDivider = nil;
+                gLabel = nil;
+                gCloseButton = nil;
                 gTestMode = NO;
                 CLog(@"lifecycle: car display found, rebuilding there");
             } else {
@@ -1011,13 +1201,11 @@ static void Tick(void)
             }
         }
         
-        if (gUserClosed) return;
-        if (!PrefBool(kPrefsEnabled, YES)) return;
+        if (gUserClosed) {
+            return;
+        }
         
-        // Crash loop protection: if we crashed 3+ times in a row,
-        // stop trying to create the interface.
-        if (gCrashCount >= 3) {
-            CLog(@"lifecycle: crash loop detected (%d), skipping create", gCrashCount);
+        if (!PrefBool(kPrefsEnabled, YES)) {
             return;
         }
         
@@ -1031,23 +1219,12 @@ __attribute__((constructor))
 static void CockpitInit(void)
 {
     @autoreleasepool {
-        if (Disabled()) return;
-        
-        CLog(@"--- Cockpit 0.0.21 loaded ---");
-        InstallCrashHandlers();
-        
-        // Read crash count from last session.
-        NSString *crashCountText = [NSString stringWithContentsOfFile:@COCKPIT_CRASHCOUNT encoding:NSUTF8StringEncoding error:nil];
-        gCrashCount = crashCountText ? [crashCountText intValue] : 0;
-        if (gCrashCount > 0) {
-            CLog(@"init: crash count from last session = %d", gCrashCount);
-            if (gCrashCount >= 3) {
-                // Reset crash count — we'll try again this session.
-                gCrashCount = 0;
-                [[NSFileManager defaultManager] removeItemAtPath:@COCKPIT_CRASHCOUNT error:nil];
-                CLog(@"init: crash count reset, will try again");
-            }
+        if (Disabled()) {
+            return;
         }
+        
+        CLog(@"--- Cockpit 0.0.19 loaded ---");
+        InstallCrashHandlers();
         
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
             LogPrefsState();
