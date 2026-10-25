@@ -1095,13 +1095,14 @@ static void CreateInterface(BOOL testMode)
     [window addSubview:gDivider];
     
     // Toggle button — always visible, lets user hide/show the panes.
-    // Custom type with no highlight adjustment and identical colors for every
-    // state: the button must look the same (semi-transparent) whether idle or
-    // pressed. The old system-type button dimmed only while touched, which
-    // read as "transparent when pressed, opaque otherwise".
+    // Custom type with identical colors for every state: the button must look
+    // the same (semi-transparent) whether idle or pressed. The old system-type
+    // button dimmed only while touched, which read as "transparent when
+    // pressed, opaque otherwise". (Custom buttons have no automatic press
+    // dimming; the highlighted-state title is set explicitly so a press can
+    // never fall back to a stale glyph either.)
     if (!gControl) gControl = [CockpitControl new];
     UIButton *toggle = [UIButton buttonWithType:UIButtonTypeCustom];
-    toggle.adjustsImageWhenHighlighted = NO;
     UIColor *glyphColor = [UIColor colorWithWhite:1.0 alpha:0.6];
     [toggle setTitle:@"✕" forState:UIControlStateNormal];
     [toggle setTitle:@"✕" forState:UIControlStateHighlighted];
