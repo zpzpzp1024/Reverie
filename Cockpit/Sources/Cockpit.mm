@@ -1,5 +1,9 @@
 // Cockpit - CarPlay split view experiments
 //
+// 0.0.24: button looks identically semi-transparent in every state (custom
+// type, no press dimming); re-fit the pane scale transform on restore and
+// health nudges (the background->foreground cycle resets it, which made
+// restored panes show a 1:1 crop instead of the fitted app UI).
 // 0.0.23: scene-state liveness (isRunning is dead weight on this device),
 // auto-recovery via nudge-then-rehost health check, toggle button at the
 // whole-screen top-left with 40% opaque background.
@@ -643,14 +647,16 @@ static void ConfigureAppViewController(id viewController, id entity, id applicat
     CLog(@"host: displayMode 4 applied");
 }
 
-static void ScaleAppViewIntoContainer(UIView *appView, UIView *container)
+// Applies the aspect-fit transform that maps the app's phone-sized scene
+// content into its pane. Extracted from ScaleAppViewIntoContainer because it
+// must be RE-applied: the system resets this transform when the scene cycles
+// background -> foreground (mode 0 -> mode 2 + displayMode 4), which made
+// restored panes show a 1:1 crop of the app ("局部放大") instead of the
+// whole UI fitted into the pane.
+static void FitAppViewToContainer(UIView *appView, UIView *container)
 {
+    if (!appView || !container) return;
     CGSize phone = [UIScreen mainScreen].bounds.size;
-    appView.backgroundColor = [UIColor clearColor];
-    appView.autoresizingMask = UIViewAutoresizingNone;
-    [container addSubview:appView];
-    appView.frame = CGRectMake(0, 0, phone.width, phone.height);
-    [appView layoutIfNeeded];
     
     id deviceController = nil;
     @try { deviceController = [appView.nextResponder valueForKey:@"_deviceAppViewController"]; } @catch (...) {}
@@ -670,18 +676,54 @@ static void ScaleAppViewIntoContainer(UIView *appView, UIView *container)
     UIView *contentView = nil;
     @try { contentView = [sceneView valueForKey:@"_sceneContentContainerView"]; } @catch (...) {}
     
-    if (contentView) {
-        CGFloat scaleX = container.bounds.size.width / MAX(phone.width, 1);
-        CGFloat scaleY = container.bounds.size.height / MAX(phone.height, 1);
-        CGFloat scale = MIN(scaleX, scaleY);
-        contentView.transform = CGAffineTransformMakeScale(scale, scale);
-        contentView.center = CGPointMake(container.bounds.size.width / 2.0,
-                                         container.bounds.size.height / 2.0);
-        CLog(@"host: scaled %.3f pane=%@ phone=%@",
-             scale, NSStringFromCGSize(container.bounds.size), NSStringFromCGSize(phone));
-    } else {
-        CLog(@"host: content view not reachable, showing unscaled");
+    if (!contentView) {
+        CLog(@"fit: content view not reachable");
+        return;
     }
+    
+    CGFloat scale = MIN(container.bounds.size.width / MAX(phone.width, 1),
+                        container.bounds.size.height / MAX(phone.height, 1));
+    contentView.transform = CGAffineTransformMakeScale(scale, scale);
+    contentView.center = CGPointMake(container.bounds.size.width / 2.0,
+                                     container.bounds.size.height / 2.0);
+    CLog(@"fit: scaled %.3f pane=%@ phone=%@",
+         scale, NSStringFromCGSize(container.bounds.size), NSStringFromCGSize(phone));
+}
+
+static void ScaleAppViewIntoContainer(UIView *appView, UIView *container)
+{
+    if (!appView || !container) return;
+    CGSize phone = [UIScreen mainScreen].bounds.size;
+    appView.backgroundColor = [UIColor clearColor];
+    appView.autoresizingMask = UIViewAutoresizingNone;
+    [container addSubview:appView];
+    appView.frame = CGRectMake(0, 0, phone.width, phone.height);
+    [appView layoutIfNeeded];
+    FitAppViewToContainer(appView, container);
+    // The initial scene activation may re-layout after us; re-assert the fit
+    // once it settles so the first paint is fitted too.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        FitAppViewToContainer(appView, container);
+    });
+}
+
+// Full "bring this slot's content back" sequence: Live mode, live display
+// mode, and a re-fit of the scale transform (which the background->
+// foreground cycle resets). The delayed re-assert catches transitions that
+// re-layout after the immediate pass.
+static void ReactivateSlot(int index)
+{
+    HostSlot *slot = gSlots[index];
+    if (!slot || !slot.viewController) return;
+    
+    SlotSetMode(index, 2);
+    ApplyDisplayMode4(slot.viewController);
+    FitAppViewToContainer(Call0(slot.viewController, @"view"), slot.container);
+    
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (gSlots[index] != slot) return;   // slot was re-hosted meanwhile
+        FitAppViewToContainer(Call0(slot.viewController, @"view"), slot.container);
+    });
 }
 
 // 0.0.23: the liveness signal is the SCENE, not SBApplication.isRunning. On
@@ -881,6 +923,15 @@ static UIView *gDivider;
 static BOOL gTestMode;
 static UIButton *gToggleButton;
 
+// The toggle glyph must be set on BOTH normal and highlighted states —
+// otherwise the press shows the stale title from the other state.
+static void SetToggleGlyph(NSString *glyph)
+{
+    if (!gToggleButton) return;
+    [gToggleButton setTitle:glyph forState:UIControlStateNormal];
+    [gToggleButton setTitle:glyph forState:UIControlStateHighlighted];
+}
+
 static void RestoreSlot(int index)
 {
     HostSlot *slot = gSlots[index];
@@ -893,8 +944,7 @@ static void RestoreSlot(int index)
          scene ? NSStringFromClass([scene class]) : @"(nil)", active);
     
     if (scene && slot.viewController) {
-        SlotSetMode(index, 2);
-        ApplyDisplayMode4(slot.viewController);
+        ReactivateSlot(index);
         return;
     }
     
@@ -926,7 +976,7 @@ static void RestoreSlot(int index)
             if (gPanes[index]) gPanes[index].hidden = YES;
         }
         if (gDivider) gDivider.hidden = YES;
-        [gToggleButton setTitle:@"⟳" forState:UIControlStateNormal];
+        SetToggleGlyph(@"⟳");
         for (int index = 0; index < 2; index++) {
             SlotSetMode(index, 0);
         }
@@ -937,7 +987,7 @@ static void RestoreSlot(int index)
             if (gPanes[index]) gPanes[index].hidden = NO;
         }
         if (gDivider) gDivider.hidden = NO;
-        [gToggleButton setTitle:@"✕" forState:UIControlStateNormal];
+        SetToggleGlyph(@"✕");
         for (int index = 0; index < 2; index++) {
             RestoreSlot(index);
         }
@@ -1045,14 +1095,18 @@ static void CreateInterface(BOOL testMode)
     [window addSubview:gDivider];
     
     // Toggle button — always visible, lets user hide/show the panes.
-    // It is a subview of the same window as the panes so it shares the
-    // display and the touch pipeline that already works; the button also
-    // survives "close" (only the panes hide), so there is always a way
-    // back in. 40% opaque background per user request (very subtle).
+    // Custom type with no highlight adjustment and identical colors for every
+    // state: the button must look the same (semi-transparent) whether idle or
+    // pressed. The old system-type button dimmed only while touched, which
+    // read as "transparent when pressed, opaque otherwise".
     if (!gControl) gControl = [CockpitControl new];
-    UIButton *toggle = [UIButton buttonWithType:UIButtonTypeSystem];
+    UIButton *toggle = [UIButton buttonWithType:UIButtonTypeCustom];
+    toggle.adjustsImageWhenHighlighted = NO;
+    UIColor *glyphColor = [UIColor colorWithWhite:1.0 alpha:0.6];
     [toggle setTitle:@"✕" forState:UIControlStateNormal];
-    [toggle setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    [toggle setTitle:@"✕" forState:UIControlStateHighlighted];
+    [toggle setTitleColor:glyphColor forState:UIControlStateNormal];
+    [toggle setTitleColor:glyphColor forState:UIControlStateHighlighted];
     toggle.titleLabel.font = [UIFont systemFontOfSize:26 weight:UIFontWeightBold];
     toggle.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.4];
     toggle.layer.cornerRadius = 24;
@@ -1144,8 +1198,7 @@ static void HealthCheckSlots(void)
         if (scene && slot.failedNudges < 2) {
             slot.failedNudges++;
             CLog(@"health[%d]: scene inactive, nudging back to live (nudge %d)", index, slot.failedNudges);
-            SlotSetMode(index, 2);
-            ApplyDisplayMode4(slot.viewController);
+            ReactivateSlot(index);
             continue;
         }
         
@@ -1215,7 +1268,7 @@ static void CockpitInit(void)
     @autoreleasepool {
         if (Disabled()) return;
         
-        CLog(@"--- Cockpit 0.0.23 loaded ---");
+        CLog(@"--- Cockpit 0.0.24 loaded ---");
         InstallExceptionFilter();
         InstallCrashHandlers();
         
